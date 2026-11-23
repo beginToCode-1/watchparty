@@ -1,0 +1,35 @@
+{
+  "name": "@watchparty/sync-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./classify": {
+      "types": "./dist/classify.d.ts",
+      "import": "./dist/classify.js"
+    },
+    "./timecode": {
+      "types": "./dist/timecode.d.ts",
+      "import": "./dist/timecode.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "dev": "tsc -w -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "node ../../scripts/lint.mjs",
+    "test": "node --test \"dist/**/*.test.js\"",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@watchparty/shared-types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2"
+  }
+}

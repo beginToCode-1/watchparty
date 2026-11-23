@@ -1,0 +1,152 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --material-bg: rgba(18, 18, 26, 0.62);
+  --material-bg-thick: rgba(14, 14, 20, 0.78);
+  --material-edge: rgba(255, 255, 255, 0.07);
+}
+
+@layer base {
+  html {
+    font: 100%/1.5 theme('fontFamily.sans');
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply min-h-dvh bg-ink-950 text-zinc-100;
+    background-image:
+      radial-gradient(1200px 600px at 15% -10%, rgba(245, 196, 81, 0.07), transparent 60%),
+      radial-gradient(900px 500px at 110% 10%, rgba(120, 90, 255, 0.06), transparent 60%);
+    background-attachment: fixed;
+  }
+  :focus-visible {
+    outline: 2px solid theme('colors.screen.DEFAULT');
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Translucent floating layer. Bigger surfaces use the thick variant (stronger blur + deeper shadow). */
+  .material {
+    background: var(--material-bg);
+    backdrop-filter: blur(20px) saturate(170%);
+    -webkit-backdrop-filter: blur(20px) saturate(170%);
+    border: 1px solid var(--material-edge);
+    @apply shadow-material;
+  }
+  .material-thick {
+    background: var(--material-bg-thick);
+    backdrop-filter: blur(32px) saturate(180%);
+    -webkit-backdrop-filter: blur(32px) saturate(180%);
+    border: 1px solid var(--material-edge);
+    box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.06) inset, 0 24px 60px -16px rgba(0, 0, 0, 0.8);
+  }
+
+  /* Feedback on pointer-down, instantly; release eases back. */
+  .pressable {
+    transition: transform 180ms cubic-bezier(0.2, 0.9, 0.3, 1), background-color 120ms ease, opacity 120ms ease;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  .pressable:active:not(:disabled) {
+    transform: scale(0.96);
+    transition-duration: 60ms;
+  }
+  .pressable:disabled {
+    @apply cursor-not-allowed opacity-40;
+  }
+
+  .btn {
+    @apply pressable inline-flex select-none items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium tracking-caption;
+  }
+  .btn-primary {
+    @apply btn bg-screen text-ink-950 hover:bg-[#ffd36b];
+  }
+  .btn-ghost {
+    @apply btn bg-white/[0.06] text-zinc-100 hover:bg-white/[0.1];
+  }
+  .btn-danger {
+    @apply btn bg-signal-err/90 text-white hover:bg-signal-err;
+  }
+  .icon-btn {
+    @apply pressable inline-flex h-10 w-10 select-none items-center justify-center rounded-full bg-white/[0.06] text-lg hover:bg-white/[0.12];
+  }
+  .icon-btn[aria-pressed='true'] {
+    @apply bg-screen text-ink-950 hover:bg-[#ffd36b];
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-white/10 bg-black/30 px-3.5 py-2.5 text-[15px] text-zinc-100 placeholder:text-zinc-500 focus:border-screen/60 focus:outline-none focus:ring-2 focus:ring-screen/25;
+  }
+  .label {
+    @apply mb-1.5 block text-xs font-medium uppercase tracking-[0.08em] text-zinc-400;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold tracking-caption;
+  }
+}
+
+/* Materialize: blur + scale + opacity together. */
+@keyframes materialize {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(4px);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+.animate-materialize {
+  animation: materialize 320ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pressable,
+  .pressable:active:not(:disabled) {
+    transform: none;
+    transition: background-color 120ms ease, opacity 120ms ease;
+  }
+  .animate-materialize {
+    animation: fade 200ms ease both;
+  }
+  @keyframes fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --material-bg: #14141c;
+    --material-bg-thick: #101017;
+  }
+  .material,
+  .material-thick {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --material-bg: #101017;
+    --material-bg-thick: #0c0c11;
+    --material-edge: rgba(255, 255, 255, 0.35);
+  }
+}
+
+/* Thin scrollbars for side panels. */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}

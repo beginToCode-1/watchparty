@@ -1,0 +1,96 @@
+# Full stack: redis, coturn, server, web. Variables come from ./.env (copy .env.example).
+# nginx (TLS edge) is an example config in nginx/nginx.conf; see docs/DEVOPS_AND_SECURITY.md §7.
+name: watchparty
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", "",
+              "--maxmemory", "256mb", "--maxmemory-policy", "volatile-ttl",
+              "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    ports: ["127.0.0.1:6379:6379"]            # loopback only; remove entirely if no host-side debugging
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+
+  coturn:
+    image: coturn/coturn:4.6.3
+    environment:
+      TURN_SECRET: ${TURN_SECRET:?TURN_SECRET is required}
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP is required}
+    # coturn does not expand ${VAR} in its config: render the template with sed, then exec turnserver.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        sed -e "s|\$${TURN_SECRET}|$${TURN_SECRET}|g"
+        -e "s|\$${TURN_EXTERNAL_IP}|$${TURN_EXTERNAL_IP}|g"
+        /etc/coturn/turnserver.conf.template > /tmp/turnserver.conf
+        && exec turnserver -c /tmp/turnserver.conf
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf.template:ro
+      - ./certs/turn:/etc/coturn/certs:ro      # fullchain.pem + privkey.pem readable by uid 'nobody'; no TLS listener without them
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "5349:5349/udp"
+      - "49160-49200:49160-49200/udp"
+    restart: unless-stopped
+    # Production alternative (Linux): network_mode: host, then drop 'ports' and widen min-port/max-port.
+
+  server:
+    build: { context: ., dockerfile: apps/server/Dockerfile }
+    environment:
+      PORT: 4000
+      HOST: 0.0.0.0
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      EXTENSION_IDS: ${EXTENSION_IDS:-}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      TURN_SECRET: ${TURN_SECRET}
+      TURN_URLS: ${TURN_URLS:-turn:localhost:3478?transport=udp,turn:localhost:3478?transport=tcp}
+      STUN_URLS: ${STUN_URLS:-stun:stun.l.google.com:19302}
+      ROOM_TTL_SECONDS: ${ROOM_TTL_SECONDS:-86400}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # X-Forwarded-For is believed only from these peers: loopback + the backend network (nginx as a compose service).
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1/8,::1/128,172.30.0.0/24}
+    ports: ["127.0.0.1:4000:4000"]             # dev only, host loopback; in production remove and reach via nginx (enables --scale server=N)
+    depends_on:
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    stop_grace_period: 30s
+    restart: unless-stopped
+    networks: [backend]
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_SERVER_URL: ${NEXT_PUBLIC_SERVER_URL:-http://localhost:4000}
+        NEXT_PUBLIC_EXTENSION_ID: ${NEXT_PUBLIC_EXTENSION_ID:-}
+    environment:
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    ports: ["3000:3000"]                       # same note as server
+    depends_on: [server]
+    restart: unless-stopped
+    networks: [backend]
+
+volumes:
+  redis-data:
+
+networks:
+  backend:
+    ipam:
+      config: [{ subnet: 172.30.0.0/24 }]      # pinned so TRUSTED_PROXIES can name it
