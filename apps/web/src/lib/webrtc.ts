@@ -6,8 +6,8 @@ import {
   type RtcOfferRelay,
 } from '@watchparty/shared-types';
 import { useRoom, type GateMode, type RemoteMedia } from '@/store/room';
-import { getSocket, type AppSocket } from './socket';
-import { SERVER_URL, readPref, writePref } from './util';
+import { getSocket, roomReady, type AppSocket } from './socket';
+import { readPref, serverUrl, writePref } from './util';
 
 // Mesh A/V + screen share (docs/WEBRTC_AND_MEDIA.md §4–§8).
 // ponytail: full mesh, ~6 video peers before uplink saturates; SFU (LiveKit/mediasoup) behind the same rtc:* events.
@@ -32,8 +32,16 @@ const SPEAKING_HANGOVER_MS = 250;
 const PTT_TAIL_MS = 150;
 const PTT_CODE = 'Space';
 const UPLINK_BPS = 15_000_000;
+const MIC_BPS = 40_000; // stereoOpus raises every Opus line to 128 kbps; voice needs far less
+const RESUME_EVENTS = ['pointerdown', 'pointerup', 'keydown'] as const; // pointerup = the activation event for touch
 
 type GainKind = 'voice' | 'screen';
+/** Live capture handed from a torn-down manager to its replacement (reconnect = new userId, D7). */
+interface LocalMedia {
+  mic: MediaStream | null;
+  cam: MediaStream | null;
+  screen: MediaStream | null;
+}
 
 interface Peer {
   id: string;
@@ -115,7 +123,7 @@ class MeshManager {
   private readonly unsubStore: () => void;
 
   constructor(
-    private readonly roomCode: string,
+    readonly roomCode: string,
     private readonly userId: string,
   ) {
     this.socket = getSocket();
@@ -128,7 +136,7 @@ class MeshManager {
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.releasePtt);
     document.addEventListener('visibilitychange', this.onVisibility);
-    document.addEventListener('pointerdown', this.resumeAudio);
+    for (const ev of RESUME_EVENTS) document.addEventListener(ev, this.resumeAudio);
     this.vadTimer = setInterval(() => this.vadTick(), VAD_TICK_MS);
     useRoom.getState().patchCall({ gateMode: this.gateMode, vadThresholdDb: this.vadDb });
     this.unsubStore = useRoom.subscribe((next, prev) => {
@@ -146,21 +154,7 @@ class MeshManager {
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 48_000 },
       });
       if (this.destroyed) return stopAll(stream);
-      const track = stream.getAudioTracks()[0];
-      if (!track) return stopAll(stream);
-      this.micStream = stream;
-      // The analyser reads a clone: the gated track is silent while closed and could never re-open the gate.
-      const clone = track.clone();
-      const src = this.ctx.createMediaStreamSource(new MediaStream([clone]));
-      const analyser = this.ctx.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0;
-      const sink = this.ctx.createGain();
-      sink.gain.value = 0;
-      src.connect(analyser).connect(sink).connect(this.ctx.destination);
-      this.micAnalyser = { src, analyser, sink, clone };
-      track.enabled = this.gateOpen();
-      void this.ctx.resume();
+      if (!this.attachMic(stream)) return stopAll(stream);
     } else {
       if (this.micStream) stopAll(this.micStream);
       this.micStream = null;
@@ -173,6 +167,25 @@ class MeshManager {
     }
     this.replaceAll(SLOT_MIC);
     this.setFlags({ audio: on });
+  }
+
+  private attachMic(stream: MediaStream): boolean {
+    const track = stream.getAudioTracks()[0];
+    if (!track) return false;
+    this.micStream = stream;
+    // The analyser reads a clone: the gated track is silent while closed and could never re-open the gate.
+    const clone = track.clone();
+    const src = this.ctx.createMediaStreamSource(new MediaStream([clone]));
+    const analyser = this.ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0;
+    const sink = this.ctx.createGain();
+    sink.gain.value = 0;
+    src.connect(analyser).connect(sink).connect(this.ctx.destination);
+    this.micAnalyser = { src, analyser, sink, clone };
+    track.enabled = this.gateOpen();
+    void this.ctx.resume();
+    return true;
   }
 
   async setCam(on: boolean): Promise<void> {
@@ -309,6 +322,28 @@ class MeshManager {
     writePref(key, JSON.stringify({ ...cur, [kind]: v }));
   }
 
+  /** Gives up the live capture so destroy() leaves it running for the next manager. */
+  release(): LocalMedia {
+    const out = { mic: this.micStream, cam: this.camStream, screen: this.screenStream };
+    this.micStream = this.camStream = this.screenStream = null;
+    return out;
+  }
+
+  /** Takes over a previous manager's capture: a Wi-Fi blip must not end mic, camera or the Mode C screen share. */
+  adopt(m: LocalMedia): void {
+    if (m.mic && !this.attachMic(m.mic)) stopAll(m.mic);
+    this.camStream = m.cam;
+    this.screenStream = m.screen;
+    m.screen?.getVideoTracks()[0]?.addEventListener('ended', () => this.stopScreenShare());
+    for (let slot = 0; slot <= SLOT_SCREEN_AUDIO; slot++) this.replaceAll(slot);
+    useRoom.getState().patchCall({
+      localCam: m.cam,
+      localScreen: m.screen,
+      screenNoAudio: !!m.screen && m.screen.getAudioTracks().length === 0,
+    });
+    this.setFlags({ audio: !!this.micStream, video: !!m.cam, screen: !!m.screen });
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -323,7 +358,7 @@ class MeshManager {
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.releasePtt);
     document.removeEventListener('visibilitychange', this.onVisibility);
-    document.removeEventListener('pointerdown', this.resumeAudio);
+    for (const ev of RESUME_EVENTS) document.removeEventListener(ev, this.resumeAudio);
     for (const id of [...this.peers.keys()]) this.closePeer(id);
     for (const s of [this.micStream, this.camStream, this.screenStream]) if (s) stopAll(s);
     this.micAnalyser?.clone.stop();
@@ -359,9 +394,18 @@ class MeshManager {
     }
   }
 
+  /**
+   * Signaling guard: only from the live session this manager belongs to, and only to a current participant.
+   * Otherwise (offline, mid re-join, stale userId after D7, peer gone) the server answers FORBIDDEN.
+   */
+  private canSend(to?: string): boolean {
+    const { session, participants } = useRoom.getState();
+    return roomReady() && session?.userId === this.userId && (to === undefined || participants.some((p) => p.id === to));
+  }
+
   private setFlags(patch: Partial<MediaFlags>): void {
     this.flags = { ...this.flags, ...patch };
-    this.socket.emit('rtc:media', this.flags);
+    if (this.canSend()) this.socket.emit('rtc:media', this.flags);
     useRoom.getState().patchCall({ mic: this.flags.audio, cam: this.flags.video, screen: this.flags.screen });
     this.sync();
   }
@@ -450,7 +494,7 @@ class MeshManager {
   private async fetchIce(): Promise<RTCIceServer[]> {
     try {
       const q = new URLSearchParams({ roomCode: this.roomCode, userId: this.userId });
-      const res = await fetch(`${SERVER_URL}/api/turn?${q.toString()}`, { cache: 'no-store' });
+      const res = await fetch(`${serverUrl()}/api/turn?${q.toString()}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const parsed = turnResponseSchema.parse(await res.json());
       const refreshS = Math.max(60, parsed.ttl - TURN_REFRESH_EARLY_S);
@@ -546,7 +590,9 @@ class MeshManager {
       if (peer.initiator && pc.signalingState === 'stable') void this.sendOffer(peer);
     };
     // null candidate = end-of-candidates, sent as candidate '' (the schema's shape for it).
-    pc.onicecandidate = (e) => this.socket.emit('rtc:ice', { to: id, candidate: { candidate: '', ...e.candidate?.toJSON() } });
+    pc.onicecandidate = (e) => {
+      if (this.canSend(id)) this.socket.emit('rtc:ice', { to: id, candidate: { candidate: '', ...e.candidate?.toJSON() } });
+    };
     pc.ontrack = (e) => this.onTrack(peer, e);
     pc.onconnectionstatechange = () => this.onConnectionState(peer);
     return peer;
@@ -557,7 +603,7 @@ class MeshManager {
       const offer = await peer.pc.createOffer();
       await peer.pc.setLocalDescription({ type: 'offer', sdp: stereoOpus(offer.sdp ?? '') });
       const sdp = peer.pc.localDescription?.sdp;
-      if (sdp) this.socket.emit('rtc:offer', { to: peer.id, sdp });
+      if (sdp && this.canSend(peer.id)) this.socket.emit('rtc:offer', { to: peer.id, sdp });
     } catch (err: unknown) {
       console.warn('offer failed', err);
     }
@@ -589,7 +635,7 @@ class MeshManager {
         const answer = await pc.createAnswer();
         await pc.setLocalDescription({ type: 'answer', sdp: stereoOpus(answer.sdp ?? '') });
         const sdp = pc.localDescription?.sdp;
-        if (sdp) this.socket.emit('rtc:answer', { to: p.from, sdp });
+        if (sdp && this.canSend(p.from)) this.socket.emit('rtc:answer', { to: p.from, sdp });
         this.sync();
       } catch (err: unknown) {
         console.warn('answer failed', err);
@@ -730,6 +776,7 @@ class MeshManager {
     const peerCount = Math.max(1, [...this.peers.values()].filter((p) => p.pc.connectionState === 'connected').length);
     const videoPeers = useRoom.getState().participants.filter((p) => p.media.video).length;
     const crowded = videoPeers > 4;
+    await setEncoding(transceivers[SLOT_MIC]?.sender, { maxBitrate: MIC_BPS });
     await setEncoding(transceivers[SLOT_CAM]?.sender, {
       maxBitrate: crowded ? 250_000 : 500_000,
       scaleResolutionDownBy: crowded ? 2 : 1,
@@ -794,9 +841,12 @@ async function setEncoding(
 
 let mesh: MeshManager | null = null;
 
+/** Same room = reconnect (new userId, D7): the new manager adopts the live mic/cam/screen instead of stopping them. */
 export function startMesh(roomCode: string, userId: string): MeshManager {
+  const carried = mesh?.roomCode === roomCode ? mesh.release() : null;
   mesh?.destroy();
   mesh = new MeshManager(roomCode, userId);
+  if (carried) mesh.adopt(carried);
   return mesh;
 }
 

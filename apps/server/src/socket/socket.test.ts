@@ -28,7 +28,7 @@ before(async () => {
 
 after(async () => {
   for (const c of clients) c.disconnect();
-  layer.close();
+  await layer.close();
   await app.close();
   await store.close();
 });
@@ -100,6 +100,16 @@ test('a socket that disconnects while room:join is in flight leaves no ghost par
   const ids = (await store.listParticipants(room.roomCode)).map((p) => p.id);
   assert.deepEqual(ids, [room.userId]);
   h.disconnect();
+});
+
+test('overlapping create/join on one socket: the second is rejected, no ghost', async () => {
+  const c = await client();
+  const [first, second] = await Promise.all([ask(c, 'room:create', { nickname: 'One' }), ask(c, 'room:create', { nickname: 'Two' })]);
+  assert.equal(code(first), 'ok');
+  assert.equal(code(second), 'RATE_LIMITED');
+  const room = data(first);
+  assert.deepEqual((await store.listParticipants(room.roomCode)).map((p) => p.id), [room.userId]);
+  c.disconnect();
 });
 
 test('room lifecycle, playback, buffering, chat, queue, rtc, http, limits', async () => {

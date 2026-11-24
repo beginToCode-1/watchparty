@@ -256,6 +256,10 @@ export function registerPlayerHandlers(ctx: Ctx): void {
   on('player:load', 'player', async (raw) => {
     const { mediaUrl } = parse(playerLoadSchema, raw);
     const m = member(socket);
+    // Control check before the outbound probe (loadMedia re-checks atomically).
+    const current = await ctx.store.getRoom(m.code);
+    if (!current) throw new AppError('ROOM_NOT_FOUND', 'Room not found');
+    assertControl(current.meta, m.userId);
     const info = await classifyWithProbe(mediaUrl);
     if (!info) throw new AppError('INVALID_PAYLOAD', 'Unsupported media URL');
     const seq = await loadMedia(ctx, m.code, m.userId, info);

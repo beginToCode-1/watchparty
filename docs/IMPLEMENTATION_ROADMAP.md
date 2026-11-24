@@ -3,7 +3,7 @@
 File-by-file build plan for the WatchParty monorepo. Every file in the contract's directory map appears here
 exactly once, with its owner, its milestone, what it must export/do, and how we know it is done.
 
-Read first: [CLAUDE.md](../CLAUDE.md) (coding contract, zero-stub policy, gate commands). Protocol detail lives in
+Read first: [CODING_CONTRACT.md](CODING_CONTRACT.md) (coding contract, zero-stub policy, gate commands). Protocol detail lives in
 [SYNC_PROTOCOL.md](SYNC_PROTOCOL.md); topology and store design in [ARCHITECTURE.md](ARCHITECTURE.md); extension
 internals in [EXTENSION_SPEC.md](EXTENSION_SPEC.md); calls/players in [WEBRTC_AND_MEDIA.md](WEBRTC_AND_MEDIA.md);
 infra and hardening in [DEVOPS_AND_SECURITY.md](DEVOPS_AND_SECURITY.md).
@@ -137,7 +137,7 @@ content script (M5, DEV-5). Any change to `shared-types` after M1 is a cross-bou
 ```
 
 Files outside the contract's directory map, and why they exist: `socket/handlers/context.ts` (shared handler
-wrapper, lives under `handlers/*`), `*.test.ts` (tests, required by CLAUDE.md), `vite-env.d.ts` (types
+wrapper, lives under `handlers/*`), `*.test.ts` (tests, required by CODING_CONTRACT.md), `vite-env.d.ts` (types
 `import.meta.env` under strict TS), `content/main-world.ts` (conditional, see M5), config files each tool
 requires.
 
@@ -157,11 +157,11 @@ requires.
   `"engines": {"node": ">=24"}`; scripts `dev|build|typecheck|test|clean` → `turbo run <task>`; devDeps
   `turbo@^2`, `typescript@^5.6`.
 - [ ] `pnpm-workspace.yaml` — `packages: ['apps/*', 'packages/*']`.
-- [ ] `turbo.json` — `$schema`, `tasks` exactly as CLAUDE.md §6 (`build` outputs `dist/**`, `.next/**`,
+- [ ] `turbo.json` — `$schema`, `tasks` exactly as CODING_CONTRACT.md §6 (`build` outputs `dist/**`, `.next/**`,
   `!.next/cache/**`; `typecheck` and `dev` depend on `^build`; `test` depends on `build`; `dev` persistent,
   uncached); `globalEnv` lists `NEXT_PUBLIC_SERVER_URL`, `NEXT_PUBLIC_EXTENSION_ID`, `VITE_SERVER_URL`,
   `VITE_WEB_URL` so cached builds are invalidated when they change.
-- [ ] `tsconfig.base.json` — exactly the block in CLAUDE.md §5.
+- [ ] `tsconfig.base.json` — exactly the block in CODING_CONTRACT.md §5.
 - [ ] `.gitignore` — `node_modules`, `dist`, `.next`, `.turbo`, `*.tsbuildinfo`, `.env`, `.env.*`,
   `!.env.example`, `*.pem`, `coverage`.
 
@@ -170,14 +170,14 @@ requires.
 - [ ] Fresh clone → `pnpm install` produces a single root `pnpm-lock.yaml`; no `package-lock.json` anywhere.
 - [ ] `pnpm build` twice in a row: second run reports all tasks `FULL TURBO` (cached).
 - [ ] Changing `VITE_WEB_URL` in the shell invalidates the extension build cache.
-- [ ] The CLAUDE.md stub grep returns `clean` on the repo.
+- [ ] The CODING_CONTRACT.md stub grep returns `clean` on the repo.
 
 ### 3.2 DEV-2 — `packages/shared-types`
 
-- [ ] `package.json` — name `@watchparty/shared-types`, `"type": "module"`, `exports` per CLAUDE.md §5,
-  dependency `zod@^3.24`; scripts per CLAUDE.md §6.
+- [ ] `package.json` — name `@watchparty/shared-types`, `"type": "module"`, `exports` per CODING_CONTRACT.md §5,
+  dependency `zod@^3.24`; scripts per CODING_CONTRACT.md §6.
 - [ ] `tsconfig.json` — extends base, `rootDir: src`, `outDir: dist`.
-- [ ] `src/constants.ts` — every constant in CLAUDE.md §4.2 / SYNC_PROTOCOL.md §2 (`as const`), plus:
+- [ ] `src/constants.ts` — every constant in CODING_CONTRACT.md §4.2 / SYNC_PROTOCOL.md §2 (`as const`), plus:
   - `RATE_LIMITS = { chat: {capacity:5, windowMs:5000}, reaction: {10, 2000}, player: {20, 5000},
     sync: {20, 5000}, rtc: {200, 10000}, metadata: {30, 60000}, turn: {10, 60000} } as const`;
     `JOIN_FAIL_MAX = 10`, `JOIN_FAIL_WINDOW_S = 600`.
@@ -203,7 +203,7 @@ requires.
   - Exported inferred types for each (`export type PlaybackState = z.infer<typeof playbackStateSchema>` …).
 - [ ] `src/events.ts` — `Ack<T>`, `AckCallback<T>`, `ClientToServerEvents`, `ServerToClientEvents`,
   `SocketData` (`{ userId?: string; roomCode?: string; nickname?: string; ip: string }`), and the ack data types
-  `RoomCreateResult`, `RoomJoinResult`, `SyncPong`. Event names and shapes exactly as CLAUDE.md §4.5.
+  `RoomCreateResult`, `RoomJoinResult`, `SyncPong`. Event names and shapes exactly as CODING_CONTRACT.md §4.5.
 - [ ] `src/index.ts` — re-exports everything (`export * from './constants.js'` …).
 - [ ] `src/schemas.test.ts` — accepts valid / rejects invalid for each payload; `roomCodeSchema` uppercases
   `k7qx2m` and rejects `O0I1AA`; extra keys are stripped; emoji outside the 12 rejected.
@@ -222,7 +222,7 @@ requires.
 - [ ] `src/timecode.ts` — `parseTimecode(s: string): number | null` accepts `m:ss`, `mm:ss`, `h:mm:ss`
   (seconds/minutes segment 00–59 when not leading), returns seconds; `formatTimecode(seconds: number): string`
   → `m:ss` under an hour, `h:mm:ss` otherwise.
-- [ ] `src/classify.ts` — `classifyMediaUrl(url: string, contentType?: string): MediaInfo | null` per CLAUDE.md
+- [ ] `src/classify.ts` — `classifyMediaUrl(url: string, contentType?: string): MediaInfo | null` per CODING_CONTRACT.md
   §4.4. Order: `local:` sentinel / `blob:` / `file:` → URL parse (fail ⇒ `null`) → non-http(s) ⇒ `null` →
   YouTube → DRM (`DRM_PROVIDERS`, host suffix match on label boundary, `amazon.*` requires `/gp/video` path) →
   HLS (extension or content type) → file extension → `unknown`/C. Extension match is on `pathname` lowercased,
@@ -281,7 +281,7 @@ requires.
   each issue as `ENV_NAME: message` and `process.exit(1)`. Exports a frozen `env` object and `type Env`.
 - [ ] `src/lib/roomCode.ts` — `generateRoomCode()` using `crypto.randomInt(0, 32)` × 6 over
   `ROOM_CODE_ALPHABET`.
-- [ ] `src/lib/sanitize.ts` — `sanitizeText(s)` per CLAUDE.md §7; `sanitizeNickname(s): string | null` and
+- [ ] `src/lib/sanitize.ts` — `sanitizeText(s)` per CODING_CONTRACT.md §7; `sanitizeNickname(s): string | null` and
   `sanitizeChat(s): string | null` (null when length out of bounds after sanitizing).
 - [ ] `src/lib/timestamps.ts` — `extractTimestamps(text): number[]`: tokens `@m:ss`, `@mm:ss`, `@h:mm:ss`
   preceded by start or whitespace, parsed with `parseTimecode`, de-duplicated, order preserved, capped at
@@ -453,7 +453,7 @@ and joins rooms with chat, reactions and the participant list; the extension's v
   media flags, broadcast `room:participants`.
 - [ ] `src/socket/index.ts` — `attachSocket(httpServer, ctx)`: `new Server<C2S, S2C, {}, SocketData>(…,
   {transports: ['websocket'], serveClient: false, maxHttpBufferSize: 200_000, pingInterval: 20000,
-  pingTimeout: 20000})`; per-connection `socket.data.ip` (XFF rule from CLAUDE.md §7) and buckets; registers
+  pingTimeout: 20000})`; per-connection `socket.data.ip` (XFF rule from CODING_CONTRACT.md §7) and buckets; registers
   all handler modules; logs connect/disconnect at `debug`.
 - [ ] `src/index.ts` — build store (memory in M2), `buildApp`, `attachSocket(app.server, …)`, `app.listen({port,
   host})`, `SIGINT`/`SIGTERM` ⇒ `io.close()`, `app.close()`, `store.close()`, exit 0; logs
@@ -626,7 +626,7 @@ via Redis.
 
 ### 5.2 DEV-3 — Redis store and adapter
 
-- [ ] `src/store/redis.ts` — `RedisStore implements RoomStore` on ioredis, keys exactly per CLAUDE.md §4.8:
+- [ ] `src/store/redis.ts` — `RedisStore implements RoomStore` on ioredis, keys exactly per CODING_CONTRACT.md §4.8:
   `createRoom` uses `HSETNX room:{code} meta` then `HSET state` + `EXPIRE` in a `MULTI`; `updateRoom` uses
   `WATCH room:{code}` / `MULTI` with ≤ 3 retries then throws (→ `INTERNAL`); `touch` refreshes TTL on all four
   room keys in one `MULTI`; `appendChat` = `RPUSH` + `LTRIM -200 -1`; `recentChat(n)` = `LRANGE -n -1`;

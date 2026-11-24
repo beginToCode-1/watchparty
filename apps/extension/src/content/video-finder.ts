@@ -9,7 +9,9 @@ const RESCAN_DEBOUNCE_MS = 250;
 const POLL_MS = 2000;
 const STABLE_SCANS_TO_IDLE = 5;
 const AD_ANCESTOR_DEPTH = 8;
-const AD_RE = /(^|[\s_-])(ad|ads|adv|advert|advertisement|sponsor|preroll|midroll|ima-ad|videoAdUi|ad-showing)([\s_-]|$)/i;
+// A token preceded by `no-` or followed by `-free` (no-ads, ads-free, video-ad-free) marks the ad-free main player.
+const AD_RE =
+  /(^|[\s_-])(?<!no[-_])(ad|ads|adv|advert|advertisement|sponsor|preroll|midroll|ima-ad|videoAdUi|ad-showing)(?![-_]free)([\s_-]|$)/i;
 const AD_HOSTS = [
   'doubleclick.net',
   'googlesyndication.com',
@@ -144,7 +146,9 @@ export function watchPrimaryVideo(onTarget: (video: HTMLVideoElement | null) => 
       onTarget(current);
     } else if (current) {
       stable++;
-      if (stable >= STABLE_SCANS_TO_IDLE && poll !== null) {
+      // Idle only when the MutationObserver (document-level) can see the video's removal: not inside a shadow root
+      // or a same-origin iframe, whose swaps it misses.
+      if (stable >= STABLE_SCANS_TO_IDLE && poll !== null && current.getRootNode() === document) {
         clearInterval(poll);
         poll = null;
       }

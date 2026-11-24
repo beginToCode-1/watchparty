@@ -1,4 +1,4 @@
-// Stub / unsafe-API gate from CLAUDE.md §2.1 and §7. Run from a package dir: scans ./src (or argv[2]).
+// Stub / unsafe-API gate from docs/CODING_CONTRACT.md §2.1 and §7. Run from a package dir: scans ./src (or argv[2]).
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 

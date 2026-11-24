@@ -76,12 +76,19 @@ export function isTrusted(trusted: BlockList, ip: string): boolean {
   return family !== 0 && trusted.check(a, family === 4 ? 'ipv4' : 'ipv6');
 }
 
-/** Client IP: the TCP peer, or the first X-Forwarded-For hop only when the peer is a trusted proxy (our nginx). */
+/**
+ * Client IP, same rule as Fastify's trustProxy: walk X-Forwarded-For from the right while the hop is a trusted proxy.
+ * Not the first hop: Cloudflare (tunnel) appends to a client-supplied XFF, so the leftmost entry is spoofable.
+ */
 export function clientIp(peer: string, xff: string | string[] | undefined, trusted: BlockList): string {
-  const direct = unmap(peer);
-  if (!isTrusted(trusted, direct)) return direct;
-  const first = (Array.isArray(xff) ? xff[0] : xff)?.split(',')[0]?.trim();
-  return first && isIP(unmap(first)) ? unmap(first) : direct;
+  let ip = unmap(peer);
+  const hops = (Array.isArray(xff) ? xff.join(',') : (xff ?? '')).split(',').map((h) => unmap(h.trim()));
+  while (isTrusted(trusted, ip)) {
+    const prev = hops.pop();
+    if (!prev || !isIP(prev)) break;
+    ip = prev;
+  }
+  return ip;
 }
 
 /** Rate-limit key: full IPv4, IPv6 collapsed to its /64 (one host usually owns the whole /64). */

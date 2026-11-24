@@ -172,12 +172,20 @@ export const bridgeErrorCodeSchema = z.enum(['INVALID_PAYLOAD', 'FORBIDDEN', 'NO
 export const httpMediaUrlSchema = mediaUrlSchema.url().refine((u) => /^https?:\/\//i.test(u), {
   message: 'Only http(s) URLs are allowed',
 });
+/** Origin of the WatchParty server the room lives on (same origin as the web app when served through it). */
+export const serverUrlSchema = z
+  .string()
+  .max(MEDIA_URL_MAX)
+  .url()
+  .refine((u) => /^https?:\/\//i.test(u), { message: 'Only http(s) URLs are allowed' })
+  .transform((u) => new URL(u).origin);
 export const wpPingSchema = z.object({ type: z.literal('WP_PING') });
 export const wpHandoffSchema = z.object({
   type: z.literal('WP_HANDOFF'),
   roomCode: roomCodeSchema,
   nickname: nicknameSchema,
   mediaUrl: httpMediaUrlSchema,
+  serverUrl: serverUrlSchema,
 });
 export const externalMessageSchema = z.discriminatedUnion('type', [wpPingSchema, wpHandoffSchema]);
 export const wpPingReplySchema = z.object({ version: z.string(), hasSession: z.boolean() });

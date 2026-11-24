@@ -4,6 +4,7 @@ import { RATE_LIMITS, metadataQuerySchema, turnQuerySchema, type ErrorCode } fro
 import { classifyMediaUrl } from '@watchparty/sync-engine/classify';
 import type { Env } from './env.js';
 import { BlockedTargetError, fetchMetadata } from './lib/metadata.js';
+import { proxyRequest } from './lib/proxy.js';
 import { KeyedLimiter, ipKey, isTrusted } from './lib/rateLimit.js';
 import { turnCredentials } from './lib/turn.js';
 import type { RoomStore } from './store/types.js';
@@ -30,6 +31,19 @@ export async function buildApp({ env, store, lifecycle }: { env: Env; store: Roo
   });
 
   await app.register(cors, { origin: env.allowedOrigins, methods: ['GET'], maxAge: 600 });
+
+  // Same-origin gateway: anything no route matched goes to the Next.js app. onRequest runs before body parsing,
+  // so bodies stream through untouched; hijacked replies skip CORS headers and the API CSP below.
+  const upstream = env.WEB_UPSTREAM;
+  if (upstream) {
+    app.addHook('onRequest', async (req, reply) => {
+      if (!req.is404) return;
+      reply.hijack();
+      proxyRequest(upstream, req.raw, reply.raw, { for: req.ip, host: req.host, proto: req.protocol }, (err) =>
+        req.log.warn({ err: err.message }, 'web upstream failed'),
+      );
+    });
+  }
 
   app.addHook('onSend', async (_req, reply, payload) => {
     reply.header('X-Content-Type-Options', 'nosniff');

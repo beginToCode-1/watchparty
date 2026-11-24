@@ -18,6 +18,8 @@ export interface RoomView {
   roomCode: string | null;
   promptCode: string;
   nickname: string;
+  /** Server the next join from the sidebar prompt goes to (last used, or the `#wp=CODE@host` link's). */
+  serverUrl: string;
   userId: string | null;
   hostId: string | null;
   hostOnlyControl: boolean;
@@ -41,6 +43,7 @@ export const initialView: RoomView = {
   roomCode: null,
   promptCode: '',
   nickname: '',
+  serverUrl: import.meta.env.VITE_SERVER_URL,
   userId: null,
   hostId: null,
   hostOnlyControl: false,

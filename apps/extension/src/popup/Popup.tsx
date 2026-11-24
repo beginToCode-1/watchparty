@@ -3,6 +3,7 @@ import { io, type Socket } from 'socket.io-client';
 import {
   nicknameSchema,
   roomCodeSchema,
+  serverUrlSchema,
   type ClientToServerEvents,
   type ServerToClientEvents,
 } from '@watchparty/shared-types';
@@ -11,18 +12,25 @@ import {
   ALL_SITES,
   NICKNAME_KEY,
   emptySchema,
+  lastServerUrl,
   readLocal,
   sendToBackground,
   sendToTab,
   sessionSchema,
   stripHash,
+  webUrlFor,
   type Session,
 } from '../bridge';
-import { CodeNameFields, primaryButton, secondaryButton } from '../content/sidebar/JoinPrompt';
+import { CodeNameFields, fieldClass, primaryButton, secondaryButton } from '../content/sidebar/JoinPrompt';
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL;
-const WEB_URL = import.meta.env.VITE_WEB_URL;
 const CREATE_TIMEOUT_MS = 8000;
+
+/** Server field -> origin; a bare host (abc.trycloudflare.com) means https. */
+function parseServer(raw: string): string | null {
+  const t = raw.trim();
+  const parsed = serverUrlSchema.safeParse(/^https?:\/\//i.test(t) ? t : `https://${t}`);
+  return parsed.success ? parsed.data : null;
+}
 
 type Health = 'checking' | 'up' | 'down';
 
@@ -30,8 +38,8 @@ type Health = 'checking' | 'up' | 'down';
  * Creates a room for `mediaUrl` on a short-lived socket and leaves it again. The room survives empty (contract D6)
  * and the content script's join makes this tab's user the host (first joiner of an empty room).
  */
-function createRoom(nickname: string, mediaUrl: string): Promise<string> {
-  const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io(SERVER_URL, {
+function createRoom(serverUrl: string, nickname: string, mediaUrl: string): Promise<string> {
+  const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io(serverUrl, {
     transports: ['websocket'],
     reconnection: false,
     timeout: CREATE_TIMEOUT_MS,
@@ -69,6 +77,8 @@ export function Popup() {
   const [mode, setMode] = useState<'join' | 'create'>('join');
   const [code, setCode] = useState('');
   const [nickname, setNickname] = useState('');
+  const [server, setServer] = useState('');
+  const [hasScript, setHasScript] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -78,7 +88,13 @@ export function Popup() {
       chrome.tabs.query({ active: true, currentWindow: true }),
       chrome.permissions.contains({ origins: ALL_SITES }),
     ]);
-    setSession(res.ok ? res.data : null);
+    const s = res.ok ? res.data : null;
+    if (s && s.tabId !== null && s.tabId === active?.id) {
+      // Our content script answers WP_SESSION_GET with INVALID_PAYLOAD; TAB_ERROR means nothing is listening.
+      const probe = await sendToTab(s.tabId, { type: 'WP_SESSION_GET' }, emptySchema);
+      setHasScript(probe.ok || probe.error.code !== 'TAB_ERROR');
+    }
+    setSession(s);
     setTab(active ?? null);
     setAllSites(granted);
   }, []);
@@ -88,20 +104,32 @@ export function Popup() {
     void readLocal(NICKNAME_KEY).then((n) => {
       if (typeof n === 'string') setNickname(n);
     });
-    fetch(`${SERVER_URL}/healthz`, { signal: AbortSignal.timeout(3000) }).then(
-      (r) => setHealth(r.ok ? 'up' : 'down'),
-      () => setHealth('down'),
-    );
+    void lastServerUrl().then((u) => setServer((cur) => cur || u));
   }, [refresh]);
+
+  const serverUrl = parseServer(server);
+  const healthUrl = session?.serverUrl ?? serverUrl;
+  useEffect(() => {
+    if (!healthUrl) return setHealth('down');
+    let stale = false; // the field changed since: ignore this answer
+    setHealth('checking');
+    fetch(`${healthUrl}/healthz`, { signal: AbortSignal.timeout(3000) }).then(
+      (r) => !stale && setHealth(r.ok ? 'up' : 'down'),
+      () => !stale && setHealth('down'),
+    );
+    return () => {
+      stale = true;
+    };
+  }, [healthUrl]);
 
   const tabUrl = tab?.url ? stripHash(tab.url) : null;
   const tabId = tab?.id;
 
   /** Points the session at the active tab and makes sure our content script runs there. */
-  const syncTab = async (roomCode: string, name: string): Promise<void> => {
+  const syncTab = async (roomCode: string, name: string, server: string): Promise<void> => {
     if (tabId === undefined || !tabUrl) throw new Error('Open the page with the video first.');
     const res = await sendToBackground(
-      { type: 'WP_SESSION_SET', roomCode, nickname: name, mediaUrl: tabUrl, tabId },
+      { type: 'WP_SESSION_SET', roomCode, nickname: name, mediaUrl: tabUrl, serverUrl: server, tabId },
       sessionSchema,
     );
     if (!res.ok) throw new Error(res.error.message);
@@ -131,14 +159,18 @@ export function Popup() {
     const name = nickname.trim();
     void run(async () => {
       if (!tabUrl) throw new Error('Open the page with the video first.');
-      const roomCode = mode === 'join' ? code : await createRoom(name, tabUrl);
-      await syncTab(roomCode, name);
+      if (!serverUrl) throw new Error('Enter the server address your host shared.');
+      const roomCode = mode === 'join' ? code : await createRoom(serverUrl, name, tabUrl);
+      await syncTab(roomCode, name, serverUrl);
     });
   };
 
   const nameOk = nicknameSchema.safeParse(nickname).success;
-  const canSubmit = !busy && nameOk && tabUrl !== null && (mode === 'create' || roomCodeSchema.safeParse(code).success);
+  const canSubmit =
+    !busy && nameOk && tabUrl !== null && serverUrl !== null && (mode === 'create' || roomCodeSchema.safeParse(code).success);
   const sessionHere = session !== null && session.tabId === tabId;
+  // Handed-off tab without our content script (non-provider page, no all-sites grant, or an orphaned script).
+  const needsJoin = sessionHere && (!hasScript || (!allSites && session.provider === null));
 
   return (
     <main className="space-y-4 p-4 text-neutral-900 dark:text-neutral-100">
@@ -155,9 +187,20 @@ export function Popup() {
           <p className="mt-1 font-mono text-[28px] font-semibold leading-none tracking-[0.14em]">{session.roomCode}</p>
           <p className="mt-1 text-[13px] text-neutral-500 dark:text-neutral-400">as {session.nickname}</p>
           <div className="mt-4 grid grid-cols-2 gap-2">
+            {needsJoin ? (
+              <button
+                type="button"
+                disabled={busy}
+                className={`${primaryButton} col-span-2`}
+                onClick={() => void run(() => syncTab(session.roomCode, session.nickname, session.serverUrl))}
+              >
+                Join on this tab
+              </button>
+            ) : null}
             {sessionHere ? (
               <button
                 type="button"
+                disabled={!hasScript}
                 className={secondaryButton}
                 onClick={() => {
                   if (session.tabId !== null) void sendToTab(session.tabId, { type: 'WP_SIDEBAR_TOGGLE' }, emptySchema);
@@ -179,7 +222,7 @@ export function Popup() {
                 Go to tab
               </button>
             )}
-            <a href={`${WEB_URL}/room/${session.roomCode}`} target="_blank" rel="noreferrer" className={`${secondaryButton} flex items-center justify-center`}>
+            <a href={`${webUrlFor(session.serverUrl)}/room/${session.roomCode}`} target="_blank" rel="noreferrer" className={`${secondaryButton} flex items-center justify-center`}>
               Open web app
             </a>
             {!sessionHere && tabUrl && (
@@ -187,7 +230,7 @@ export function Popup() {
                 type="button"
                 disabled={busy}
                 className={`${primaryButton} col-span-2`}
-                onClick={() => void run(() => syncTab(session.roomCode, session.nickname))}
+                onClick={() => void run(() => syncTab(session.roomCode, session.nickname, session.serverUrl))}
               >
                 Sync this tab instead
               </button>
@@ -224,6 +267,18 @@ export function Popup() {
               </button>
             ))}
           </div>
+          <label className="block">
+            <span className="mb-1 block text-[12px] font-medium text-neutral-500 dark:text-neutral-400">Server</span>
+            <input
+              value={server}
+              onChange={(e) => setServer(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="https://abc-def.trycloudflare.com"
+              aria-invalid={serverUrl === null}
+              className={fieldClass}
+            />
+          </label>
           <CodeNameFields
             code={mode === 'join' ? code : undefined}
             onCode={setCode}
@@ -261,7 +316,7 @@ export function Popup() {
             Enable on all sites
           </button>
         )}
-        <a href={WEB_URL} target="_blank" rel="noreferrer" className="font-medium text-[#007aff] dark:text-[#0a84ff]">
+        <a href={webUrlFor(healthUrl ?? import.meta.env.VITE_SERVER_URL)} target="_blank" rel="noreferrer" className="font-medium text-[#007aff] dark:text-[#0a84ff]">
           Open WatchParty
         </a>
       </footer>

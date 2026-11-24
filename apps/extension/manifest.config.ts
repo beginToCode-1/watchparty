@@ -3,6 +3,13 @@ import { loadEnv } from 'vite';
 import { PROVIDER_MATCHES } from '@watchparty/shared-types';
 import pkg from './package.json' with { type: 'json' };
 
+/** SPKI public key (base64 DER) pinning the extension ID, so every unpacked copy gets the same ID. The private key
+ *  was discarded: the ID only needs the public half, and nothing is ever packed or signed for the store. */
+const KEY =
+  'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxSow+yOgjkJnFrBlRFG0g3TzmRLvU62rwoZEr+6P2EmH/GIaZW8Li++zGx443nUkcuzZRX0oRip3DOTUPB0HHXY4AR8Ppm/7zrDiizEFxCdg4bniArTCdQ2+BIx+DcLOY6upkj134TacsM66dcEHcVWf7BN+hkpiMiyj6ZKzCW09iA9OBG2k201juPSHpRixOMjAOdqixysfOFTQsORW4REloe/DHnsLpXeBm1ZTk/z/BNTzLg8tvFyz2UaZ3tCji7alR5dWsZf9+/04omJUoQMZ+/yUuZeJSHjlQ+ypX7qLq/XwiyfhQj7v+u2weJV+GFTMT1pfCT87PJIkSuIh3QIDAQAB';
+/** Extension ID derived from KEY (sha256 of the DER, first 32 hex chars mapped 0-f -> a-p). */
+export const EXTENSION_ID = 'kgeaggokfampiakpipghoaeockijhbai';
+
 const DEFAULTS = { VITE_SERVER_URL: 'http://localhost:4000', VITE_WEB_URL: 'http://localhost:3000' } as const;
 
 /** VITE_* URLs from apps/extension/.env (or the shell), defaulting to local dev. Throws on an invalid URL. */
@@ -26,6 +33,7 @@ export default defineManifest(({ mode }) => {
   const { serverUrl, webUrl } = resolveUrls(mode);
   return {
     manifest_version: 3,
+    key: KEY,
     name: 'WatchParty',
     version: pkg.version,
     description: 'Watch together in sync on any streaming site.',
@@ -38,7 +46,8 @@ export default defineManifest(({ mode }) => {
     content_scripts: [
       { matches: PROVIDER_MATCHES, js: ['src/content/index.tsx'], run_at: 'document_idle', all_frames: false },
     ],
-    externally_connectable: { matches: [`${webUrl}/*`] },
+    // The tunnel origin changes every run; background.ts re-checks the sender origin (see its shortcut: note).
+    externally_connectable: { matches: [...new Set([`${webUrl}/*`, `${serverUrl}/*`]), 'https://*.trycloudflare.com/*'] },
     commands: {
       'toggle-sidebar': { suggested_key: { default: 'Alt+Shift+W' }, description: 'Toggle the WatchParty sidebar' },
     },

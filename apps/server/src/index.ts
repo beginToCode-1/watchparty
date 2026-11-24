@@ -35,7 +35,7 @@ async function shutdown(signal: string): Promise<void> {
   lifecycle.shuttingDown = true; // /healthz now answers 503
   app.log.info({ signal }, 'shutting down');
   setTimeout(() => process.exit(1), 10_000).unref();
-  sockets.close();
+  await sockets.close(); // bounded by the force-exit above
   await app.close();
   await store.close();
   if (adapter) await Promise.allSettled([adapter.pub.quit(), adapter.sub.quit()]);

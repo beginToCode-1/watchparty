@@ -28,6 +28,8 @@ export interface Deps {
   log: FastifyBaseLogger;
   /** Wait-for-buffer timers on this instance, cleared on shutdown. */
   timers: Set<NodeJS.Timeout>;
+  /** In-flight disconnect cleanups, awaited on shutdown before the store closes. */
+  cleanups: Set<Promise<void>>;
 }
 
 /**

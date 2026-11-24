@@ -19,6 +19,9 @@ const HLS_CONFIG: Partial<HlsConfig> = {
   startFragPrefetch: true,
   capLevelToPlayerSize: true,
   abrEwmaDefaultEstimate: 5_000_000,
+  // Must stay explicit even though 3 is hls.js's default: setting liveMaxLatencyDurationCount without it throws
+  // "Illegal hls.js config" and every HLS stream fails to start.
+  liveSyncDurationCount: 3,
   liveMaxLatencyDurationCount: 10,
   maxLiveSyncPlaybackRate: 1,
   liveDurationInfinity: true,
@@ -130,7 +133,10 @@ export function VideoPlayer({ src, kind }: { src: string; kind: MediaKind }) {
           else if (video.canPlayType('application/vnd.apple.mpegurl')) video.src = src;
           else setError('HLS is not supported in this browser.');
         })
-        .catch(() => setError('Could not load the HLS player.'));
+        .catch((err: unknown) => {
+          console.error('hls.js failed to start', err);
+          setError('Could not load the HLS player.');
+        });
     } else {
       video.src = src;
     }

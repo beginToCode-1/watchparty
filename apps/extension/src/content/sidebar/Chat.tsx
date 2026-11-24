@@ -37,6 +37,7 @@ export function Chat({
 }) {
   const chat = useRoom((s) => s.chat);
   const me = useRoom((s) => s.userId);
+  const joined = useRoom((s) => s.phase === 'joined');
   const list = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const [draft, setDraft] = useState('');
@@ -49,7 +50,7 @@ export function Chat({
   const submit = (e: FormEvent) => {
     e.preventDefault();
     const text = draft.trim();
-    if (!text) return;
+    if (!text || !joined) return;
     onSend(text);
     setDraft('');
     stick.current = true;
@@ -107,13 +108,14 @@ export function Chat({
           onChange={(e) => setDraft(e.target.value)}
           maxLength={CHAT_TEXT_MAX}
           autoComplete="off"
-          placeholder="Message"
+          disabled={!joined}
+          placeholder={joined ? 'Message' : 'Reconnecting…'}
           className="h-9 min-w-0 flex-1 rounded-full border border-black/10 bg-white/70 px-4 text-[14px] text-neutral-900 placeholder:text-neutral-400 focus:border-[#007aff] focus:outline-none focus:ring-2 focus:ring-[#007aff]/30 dark:border-white/10 dark:bg-white/[0.08] dark:text-neutral-100"
         />
         <button
           type="submit"
           aria-label="Send message"
-          disabled={draft.trim().length === 0}
+          disabled={!joined || draft.trim().length === 0}
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#007aff] text-white transition-[transform,opacity] duration-100 active:scale-[0.92] disabled:opacity-30 dark:bg-[#0a84ff]"
         >
           <Send width={18} height={18} />

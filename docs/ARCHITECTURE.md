@@ -6,7 +6,7 @@
 > [WEBRTC_AND_MEDIA.md](./WEBRTC_AND_MEDIA.md) (mesh calls, screen share, TURN),
 > [DEVOPS_AND_SECURITY.md](./DEVOPS_AND_SECURITY.md) (deployment, nginx, coturn, threat model),
 > [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md) (build order and milestones),
-> [../README.md](../README.md) and [../CLAUDE.md](../CLAUDE.md) (quick start and contributor rules).
+> [../README.md](../README.md) and [CODING_CONTRACT.md](CODING_CONTRACT.md) (quick start and contributor rules).
 
 ---
 
@@ -48,7 +48,7 @@ flowchart LR
   end
 
   subgraph Edge["Edge / reverse proxy"]
-    NGINX["nginx<br/>TLS, WS upgrade,<br/>sticky ip_hash"]
+    NGINX["nginx<br/>TLS, WS upgrade"]
   end
 
   subgraph Backend["Backend"]
@@ -93,7 +93,7 @@ d:\strreaming platform\
 │   └── turnserver.conf               # use-auth-secret, static-auth-secret=${TURN_SECRET}, relay 49160-49200
 ├── nginx/
 │   └── nginx.conf                    # example TLS edge: /socket.io/ upgrade, /api/ -> :4000, / -> :3000
-├── CLAUDE.md
+├── CODING_CONTRACT.md
 ├── README.md
 ├── docs/
 │   ├── ARCHITECTURE.md               # this file
@@ -149,6 +149,7 @@ d:\strreaming platform\
 │   │           ├── roomCode.ts       # crypto.randomInt over ROOM_CODE_ALPHABET, collision retry
 │   │           ├── turn.ts           # HMAC-SHA1 time-limited TURN credentials
 │   │           ├── metadata.ts       # SSRF-safe OpenGraph scrape + YouTube oEmbed
+│   │           ├── proxy.ts          # WEB_UPSTREAM same-origin gateway: stream non-API requests to Next.js
 │   │           ├── sanitize.ts       # sanitizeText(): CR/LF/TAB -> space, strip control + bidi-override chars, trim
 │   │           └── timestamps.ts     # parse @mm:ss / @h:mm:ss tags -> seconds[]
 │   ├── web/                          # @watchparty/web  (Next.js 15 App Router, React 19, Tailwind 3.4, Zustand 5; :3000)
@@ -326,7 +327,8 @@ Matching details:
   * `youtube.com/watch?v=ID` (any subdomain: `www.`, `m.`, `music.`),
   * `youtu.be/ID`,
   * `youtube.com/shorts/ID`,
-  * `youtube.com/embed/ID`.
+  * `youtube.com/embed/ID`,
+  * `youtube.com/live/ID`.
   A YouTube host without a valid id (channel page, search) falls through and ends as `unknown` / Mode C.
 * `local`: `local:<filename>` is the wire sentinel. A `blob:` URL is meaningless to other participants (it is scoped to one document), so the web client converts a picked `File` to `local:<file.name>` before sending `player:load`; `blob:`/`file:` are still classified as `local` so a pasted one routes correctly. Each participant is prompted to pick their own copy of the file.
 
@@ -338,7 +340,7 @@ Test vectors (unit tests in `packages/sync-engine`):
 | `https://example.com/stream`, contentType `application/vnd.apple.mpegurl` | `{kind:'hls', mode:'A'}` |
 | `https://example.com/v/movie.MKV` | `{kind:'file', mode:'A'}` |
 | `https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42` | `{kind:'youtube', mode:'A', youtubeId:'dQw4w9WgXcQ'}` |
-| `https://youtu.be/dQw4w9WgXcQ`, `.../shorts/dQw4w9WgXcQ`, `.../embed/dQw4w9WgXcQ`, `https://music.youtube.com/watch?v=dQw4w9WgXcQ` | `youtube`, same id |
+| `https://youtu.be/dQw4w9WgXcQ`, `.../shorts/dQw4w9WgXcQ`, `.../embed/dQw4w9WgXcQ`, `.../live/dQw4w9WgXcQ`, `https://music.youtube.com/watch?v=dQw4w9WgXcQ` | `youtube`, same id |
 | `https://www.youtube.com/@somechannel` | `{kind:'unknown', mode:'C'}` |
 | `local:holiday.mp4` | `{kind:'local', mode:'A', url:'local:holiday.mp4'}` |
 | `blob:http://localhost:3000/5e1c...` | `{kind:'local', mode:'A'}` |
@@ -401,7 +403,7 @@ sequenceDiagram
   actor G as Guest (browser)
 
   H->>W: nickname + optional link, click Create
-  W->>S: connect (transports websocket, polling fallback)
+  W->>S: connect (transports websocket only)
   W->>S: sync:ping x8 burst (clock sync starts before any room exists)
   S-->>W: ack t0, t1, t2 (each)
   W->>S: room:create {nickname, mediaUrl?}
@@ -646,7 +648,7 @@ Per-socket token buckets live in process memory (a socket is pinned to one insta
 
 ### 6.4 Multi-instance
 
-With `REDIS_URL` set, `@socket.io/redis-adapter` fans broadcasts out through Redis pub/sub, and nginx uses `ip_hash` so HTTP long-polling requests of one session hit the same instance. Without `REDIS_URL` the in-memory store is used and the deployment **must** be a single instance. The wait-for-buffer 8 s timer is scheduled on the instance that entered the waiting state; it is idempotent (compares `buffer.startedAt`) and any later `player:*` event on any instance resolves an overdue wait, so an instance crash cannot stall a room forever (see [SYNC_PROTOCOL.md §8](./SYNC_PROTOCOL.md#8-wait-for-buffer)).
+With `REDIS_URL` set, `@socket.io/redis-adapter` fans broadcasts out through Redis pub/sub; the server is websocket-only, so no sticky sessions are needed. Without `REDIS_URL` the in-memory store is used and the deployment **must** be a single instance. The wait-for-buffer 8 s timer is scheduled on the instance that entered the waiting state; it is idempotent (compares `buffer.startedAt`) and any later `player:*` event on any instance resolves an overdue wait, so an instance crash cannot stall a room forever (see [SYNC_PROTOCOL.md §8](./SYNC_PROTOCOL.md#8-wait-for-buffer)).
 
 ---
 
@@ -687,7 +689,7 @@ The client IP is `socket.handshake.address`, except when the direct peer is loop
 
 ### 8.4 Origins and CORS
 
-* HTTP (`/api/*`) and Socket.IO long-polling: CORS allowlist = `CORS_ORIGINS` (comma list) + `chrome-extension://{id}` for each id in `EXTENSION_IDS`.
+* HTTP (`/api/*`): CORS allowlist = `CORS_ORIGINS` (comma list) + `chrome-extension://{id}` for each id in `EXTENSION_IDS`.
 * **Content-script sockets carry the host page's Origin** (e.g. `https://www.netflix.com`), not the extension origin, because MV3 content-script network requests are attributed to the page. CORS does not apply to WebSocket, so the content script connects with `transports: ['websocket']`, and the server's `allowRequest` accepts WebSocket upgrades regardless of Origin. This is safe because of rule 4 in §2: there are no cookies or ambient credentials for a cross-site page to ride on; the room code is the only capability, and joins are rate-limited per IP. Any HTTP call the content script needs is routed through the background service worker (extension origin, allowlisted). Threat-model discussion in [DEVOPS_AND_SECURITY.md](./DEVOPS_AND_SECURITY.md).
 
 ### 8.5 Failure modes

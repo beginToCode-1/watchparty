@@ -19,7 +19,8 @@ const securityHeaders = [
 const config: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
-  output: 'standalone',
+  // Only the Docker image needs the standalone server; `next start` (pnpm party) warns when it is set.
+  output: process.env.NEXT_STANDALONE === '1' ? 'standalone' : undefined,
   eslint: { ignoreDuringBuilds: true },
   async headers() {
     return [{ source: '/:path*', headers: securityHeaders }];

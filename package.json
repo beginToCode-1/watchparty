@@ -12,7 +12,8 @@
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "test": "turbo run test",
-    "clean": "turbo run clean"
+    "clean": "turbo run clean",
+    "party": "node scripts/party.mjs"
   },
   "devDependencies": {
     "turbo": "^2.11.13",

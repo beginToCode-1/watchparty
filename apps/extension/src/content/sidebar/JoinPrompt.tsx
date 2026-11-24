@@ -52,6 +52,7 @@ export function CodeNameFields(props: {
 export function JoinPrompt({ onJoin, onDismiss }: { onJoin: (code: string, nickname: string) => void; onDismiss: () => void }) {
   const promptCode = useRoom((s) => s.promptCode);
   const savedNickname = useRoom((s) => s.nickname);
+  const serverUrl = useRoom((s) => s.serverUrl);
   const [code, setCode] = useState(promptCode);
   const [nickname, setNickname] = useState(savedNickname);
   const valid = roomCodeSchema.safeParse(code).success && nicknameSchema.safeParse(nickname).success;
@@ -67,6 +68,9 @@ export function JoinPrompt({ onJoin, onDismiss }: { onJoin: (code: string, nickn
         <h2 className="text-[20px] font-semibold leading-tight tracking-[-0.01em]">Join the watch party</h2>
         <p className="mt-1 text-[13px] text-neutral-500 dark:text-neutral-400">
           You will sync this tab&apos;s video with everyone in the room.
+        </p>
+        <p className="mt-1 truncate text-[12px] text-neutral-500 dark:text-neutral-400" title={serverUrl}>
+          Server: {new URL(serverUrl).host}
         </p>
       </div>
       <CodeNameFields code={code} onCode={setCode} nickname={nickname} onNickname={setNickname} />

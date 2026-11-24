@@ -5,10 +5,12 @@ import {
   type WpHandoffMessage,
   type WpPingReply,
 } from '@watchparty/shared-types';
+import { serverUrl } from './util';
 
 // Web -> extension bridge (docs/EXTENSION_SPEC.md §7.2). `chrome.runtime` only exists on our origin when an
 // installed extension lists it in `externally_connectable`, so everything is feature-detected.
-const EXTENSION_ID = process.env.NEXT_PUBLIC_EXTENSION_ID ?? '';
+// Pinned by the `key` in apps/extension/manifest.config.ts, so every unpacked copy has this id.
+const EXTENSION_ID = process.env.NEXT_PUBLIC_EXTENSION_ID || 'kgeaggokfampiakpipghoaeockijhbai';
 const PING_TIMEOUT_MS = 800;
 const HANDOFF_TIMEOUT_MS = 5_000;
 
@@ -52,8 +54,9 @@ export async function pingExtension(): Promise<WpPingReply | null> {
 }
 
 /** Hands the room to the extension, which opens/focuses the provider tab. Throws a readable error. */
-export async function handoffToExtension(msg: Omit<WpHandoffMessage, 'type'>): Promise<number> {
-  const reply = parseBridgeReply(await sendToExtension({ type: 'WP_HANDOFF', ...msg }, HANDOFF_TIMEOUT_MS), wpHandoffReplySchema);
+export async function handoffToExtension(msg: Omit<WpHandoffMessage, 'type' | 'serverUrl'>): Promise<number> {
+  const handoff: WpHandoffMessage = { type: 'WP_HANDOFF', ...msg, serverUrl: serverUrl() };
+  const reply = parseBridgeReply(await sendToExtension(handoff, HANDOFF_TIMEOUT_MS), wpHandoffReplySchema);
   if (!reply) throw new Error('The extension did not answer. Is it installed and enabled?');
   if (!reply.ok) throw new Error(reply.error.message);
   return reply.data.tabId;
