@@ -2,7 +2,7 @@ import { DRM_PROVIDERS, MEDIA_URL_MAX, YOUTUBE_ID_REGEX, type MediaInfo } from '
 
 const LOCAL_SENTINEL = /^local:([^/\\\u0000-\u001f]{1,255})$/;
 const YT_HOST = /^(?:www\.|m\.|music\.)?youtube\.com$/;
-const YT_PATH = /^\/(?:shorts|embed)\/([A-Za-z0-9_-]{11})(?:[/?#]|$)/;
+const YT_PATH = /^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})(?:[/?#]|$)/;
 const YT_SHORT_PATH = /^\/([A-Za-z0-9_-]{11})(?:\/|$)/;
 const HLS_PATH = /\.m3u8$/i;
 const HLS_MIME = new Set(['application/vnd.apple.mpegurl', 'application/x-mpegurl']);
@@ -20,7 +20,7 @@ function youtubeId(host: string, url: URL): string | null {
 
 /**
  * Classifies a media link (docs/WEBRTC_AND_MEDIA.md §1). Pure, synchronous, no DOM.
- * Invalid input returns `null` and never throws (CLAUDE.md decision D1); callers map it to INVALID_PAYLOAD.
+ * Invalid input returns `null` and never throws (docs/CODING_CONTRACT.md decision D1); callers map it to INVALID_PAYLOAD.
  * `contentType` (optional) upgrades an extensionless URL to `hls` when it is an HLS MIME type.
  */
 export function classifyMediaUrl(input: string, contentType?: string): MediaInfo | null {

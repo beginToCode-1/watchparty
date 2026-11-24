@@ -6,6 +6,7 @@ import {
   nicknameSchema,
   parseBridgeReply,
   roomCodeSchema,
+  serverUrlSchema,
   userIdSchema,
   type BridgeErrorCode,
   type BridgeReply,
@@ -15,6 +16,7 @@ import { classifyMediaUrl } from '@watchparty/sync-engine';
 export const SESSION_KEY = 'wp:session';
 export const NICKNAME_KEY = 'wp:nickname';
 export const COLLAPSED_KEY = 'wp:sidebarCollapsed';
+export const SERVER_KEY = 'wp:server';
 export const ALL_SITES = ['https://*/*', 'http://*/*'];
 export const DYNAMIC_SCRIPT_ID = 'wp-all';
 
@@ -22,6 +24,7 @@ export const sessionSchema = z.object({
   roomCode: roomCodeSchema,
   nickname: nicknameSchema,
   mediaUrl: httpMediaUrlSchema,
+  serverUrl: serverUrlSchema,
   provider: drmProviderSchema.nullable(),
   tabId: z.number().int().nullable(),
   userId: userIdSchema.nullable(),
@@ -34,6 +37,7 @@ export const sessionSetSchema = z.object({
   roomCode: roomCodeSchema,
   nickname: nicknameSchema,
   mediaUrl: httpMediaUrlSchema,
+  serverUrl: serverUrlSchema,
   userId: userIdSchema.optional(),
   tabId: z.number().int().optional(),
 });
@@ -120,3 +124,20 @@ export async function readLocal(key: string): Promise<unknown> {
     return undefined;
   }
 }
+
+/** Last server a room was joined on (written by the content script after a successful join), else the build default. */
+export async function lastServerUrl(): Promise<string> {
+  const parsed = serverUrlSchema.safeParse(await readLocal(SERVER_KEY));
+  return parsed.success ? parsed.data : import.meta.env.VITE_SERVER_URL;
+}
+
+/** `wp=CODE[@host]` link fragment. Only https servers carry their host: `#wp=CODE@host` is read back as https://host. */
+export function wpHash(roomCode: string, serverUrl: string): string {
+  const u = new URL(serverUrl);
+  return u.protocol === 'https:' ? `wp=${roomCode}@${u.host}` : `wp=${roomCode}`;
+}
+
+/** Web app origin for a server. shortcut: any non-default server is assumed to serve the web app from its own
+ *  origin (the one-origin tunnel setup); add a separate web URL to the session if split deployments need it. */
+export const webUrlFor = (serverUrl: string): string =>
+  serverUrl === import.meta.env.VITE_SERVER_URL ? import.meta.env.VITE_WEB_URL : serverUrl;

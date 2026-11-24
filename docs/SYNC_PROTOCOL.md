@@ -68,6 +68,7 @@ export const SEEK_DEBOUNCE_MS = 250;
 
 // Wait-for-buffer
 export const BUFFER_GRACE_MS = 400;
+export const STARTUP_GRACE_MS = 1_500;         // grace for a stall within this long after a play start
 export const BUFFER_TIMEOUT_MS = 8_000;
 export const RESUME_DELAY_MS = 300;
 
@@ -293,8 +294,9 @@ onState(s: PlaybackState):
   apply(s, prev);
 
 apply(s, prev):
+  const debounceS = prev?.paused && !s.paused ? (INTENT_DEBOUNCE_MS / 1000) * s.rate : 0;  // sender ran on during its debounce
   const jump = prev === null
-    || Math.abs(expectedPos(prev, s.updatedAt) - s.position) > DRIFT_IGNORE_S;   // a real timeline discontinuity
+    || Math.abs(expectedPos(prev, s.updatedAt) - s.position) > DRIFT_IGNORE_S + debounceS;   // a real timeline discontinuity
   withRemoteLock(() => {
     if (Math.abs(adapter.getRate() - s.rate) > 0.001) { adapter.setRate(s.rate); appliedRate = s.rate; }
     const local = adapter.getPosition();
@@ -314,7 +316,9 @@ apply(s, prev):
     const drift = local - target;
     const threshold = jump ? DRIFT_IGNORE_S : hardSeekThreshold();
     if (Math.abs(drift) > threshold) adapter.seek(target + (clock.rtt / 2000) * s.rate);
-    if (adapter.isPaused()) adapter.play().catch(onAutoplayBlocked);
+    const d = adapter.getDuration();
+    if (adapter.isPaused() && (d === null || target < d - DRIFT_IGNORE_S))   // never play() at the end: it restarts from 0
+      adapter.play().catch((e) => { if (e.name === 'NotAllowedError') onAutoplayBlocked(e); });
   });
 
 hardSeekThreshold() = adapter.supportsFineRate ? DRIFT_HARD_SEEK_S : DRIFT_HARD_SEEK_COARSE_S;
@@ -324,7 +328,7 @@ Rules:
 
 * A **jump** (someone seeked, media loaded, a buffer pause moved the timeline) is corrected by seeking whenever `|drift| > 80 ms`, because nudging a deliberate multi-second jump at ±4 % would take minutes. Non-jump changes (play after pause, rate change, scheduled resume) go through the normal bands.
 * A scheduled timer is cancelled whenever a newer `room:state` arrives.
-* **Autoplay policy**: `play()` can reject with `NotAllowedError` for a guest who has not interacted with the page. `onAutoplayBlocked` shows a "Click to join playback" overlay; the click handler calls `apply(current, current)` under a fresh lock. The rejection is never turned into a pause intent.
+* **Autoplay policy**: `play()` can reject with `NotAllowedError` for a guest who has not interacted with the page. Any other rejection (`AbortError` when a `pause()` overtakes the play, adapter teardown) only releases the lock's `play` expectation; it is not an autoplay block. `onAutoplayBlocked` shows a "Click to join playback" overlay; the click handler calls `apply(current, current)` under a fresh lock. The rejection is never turned into a pause intent.
 * `hostApp.loadMedia` creates the adapter for `s.kind` (hls.js / native video / YouTube / local-file picker) and calls `controller.attach(adapter)`, which runs `apply(current, null)` once the adapter reports `readyState() >= 1`.
 
 ### 5.3 The `isRemoteAction` lock (echo suppression)
@@ -346,7 +350,7 @@ withRemoteLock(fn):
 isRemoteAction() = lock !== null
 ```
 
-* While the lock is held, `play`, `pause`, `seeked`, `ratechange` events **never** become intents.
+* While the lock is held, an event in `lock.expected` is consumed and **never** becomes an intent; an unexpected `seeked`/`ratechange` is a side effect of the remote action and is dropped; an unexpected `play`/`pause` is the user acting and goes through §5.4 as usual.
 * Buffering events (`waiting`, `stalled`, `playing`, `canplaythrough`) are **not** suppressed: buffering is a fact, not an intent.
 * Drift-loop **rate** nudges do not take the lock (it would block user intents for 300 ms every tick). Their `ratechange` echoes are recognised because `|adapter.getRate() − appliedRate| ≤ 0.001`, where `appliedRate` is the last rate the controller set. Drift-loop **seeks** do take the lock.
 
@@ -425,7 +429,7 @@ Hard-seek lead `rtt/2 × rate`: a seek on a playing element completes after deco
 ```ts
 every CORRECTION_INTERVAL_MS (500 ms) while attached:
   if (!current || current.paused || current.mode === 'C') return;
-  if (isRemoteAction() || adapter.isSeeking() || roomWaiting || localBufferingReported) return;
+  if (isRemoteAction() || adapter.isSeeking() || roomWaiting || bufferPhase !== 'idle') return;   // grace counts too
   if (!clockUsable() || current.updatedAt > clock.serverNow()) return;   // scheduled resume pending
   const base = current.rate;
   const target = expectedPos(current, clock.serverNow());
@@ -436,6 +440,8 @@ every CORRECTION_INTERVAL_MS (500 ms) while attached:
   } else if (a <= hardSeekThreshold()) {
     if (adapter.supportsFineRate) setRateIfChanged(base * clamp(1 - drift * DRIFT_GAIN, CORRECTION_RATE_MIN, CORRECTION_RATE_MAX));
   } else {
+    if (Date.now() - lastDriftSeekAt < SEEK_LOCK_MAX_MS) return;   // 5 s cooldown: a seek that never lands must not loop
+    lastDriftSeekAt = Date.now();
     setRateIfChanged(base);
     withRemoteLock(() => adapter.seek(target + (clock.rtt / 2000) * base));
   }
@@ -468,7 +474,7 @@ sequenceDiagram
   C->>C: apply(state, null): jump=true, seek to expectedPos + rtt/2, play
 ```
 
-* **Reconnect**: Socket.IO auto-reconnects. The client clears clock samples, re-runs the burst and re-sends `room:join` with the stored code and nickname; it receives a new `userId`. `lastSeq` is reset to `null` so the ack's `state` is applied regardless of its `seq`.
+* **Reconnect**: Socket.IO auto-reconnects. The client clears clock samples, re-runs the burst and re-sends `room:join` with the stored code and nickname; it receives a new `userId`. `lastSeq` is reset to `null` so the ack's `state` is applied regardless of its `seq`. The buffering reporter is reset to Idle (the server forgot the old socket's report) and, if `readyState() < 3`, re-enters Grace so a still-stalled client reports again.
 * **Media change** (`mediaUrl` differs): controller detaches the old adapter (pending intents dropped, buffering reported `false` if it was reported), host app builds the new adapter, `attach` applies `current`.
 * **Mode B**: identical, with the adapter built by `video-finder.ts` over the provider's `<video>`; re-bound when the provider replaces the element ([EXTENSION_SPEC.md](./EXTENSION_SPEC.md)).
 
@@ -491,6 +497,7 @@ stateDiagram-v2
 
 * The `readyState() >= 3` (HAVE_FUTURE_DATA) poll is required: while the room is paused for buffering, `playing` will not fire on the stalled client, and `canplaythrough` is unreliable under MSE (hls.js).
 * A media `error` clears the report so a viewer who cannot play at all never stalls the room.
+* **Startup grace**: a stall that begins within `STARTUP_GRACE_MS` (1.5 s) of a play start (remote apply or local play) gets `STARTUP_GRACE_MS` instead of 400 ms, so cold starts (YouTube's first `BUFFERING`, HLS) don't pause the room; the drift loop is idle meanwhile and catches the late starter up once it plays.
 * `player:buffering` is sent without debounce beyond the grace period, on the `player` rate-limit bucket.
 
 ### 8.2 Server side: room state machine

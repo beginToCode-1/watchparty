@@ -116,10 +116,15 @@ test('playback state', () => {
 });
 
 test('extension bridge handoff accepts only http(s) media', () => {
-  const base = { type: 'WP_HANDOFF', roomCode: 'abc23k', nickname: 'Ann' };
-  assert.equal(externalMessageSchema.safeParse({ ...base, mediaUrl: 'https://www.netflix.com/watch/1' }).success, true);
+  const base = { type: 'WP_HANDOFF', roomCode: 'abc23k', nickname: 'Ann', serverUrl: 'https://x.trycloudflare.com/room/ABC' };
+  const ok = externalMessageSchema.safeParse({ ...base, mediaUrl: 'https://www.netflix.com/watch/1' });
+  assert.equal(ok.success && ok.data.type === 'WP_HANDOFF' && ok.data.serverUrl, 'https://x.trycloudflare.com');
   for (const mediaUrl of ['javascript:alert(1)', 'file:///etc/passwd', 'data:text/html,x', 'not a url']) {
     assert.equal(externalMessageSchema.safeParse({ ...base, mediaUrl }).success, false, mediaUrl);
+  }
+  for (const serverUrl of ['javascript:alert(1)', 'ws://x.io', undefined]) {
+    const m = { ...base, serverUrl, mediaUrl: 'https://www.netflix.com/watch/1' };
+    assert.equal(externalMessageSchema.safeParse(m).success, false, String(serverUrl));
   }
   assert.equal(externalMessageSchema.safeParse({ type: 'WP_PING' }).success, true);
   assert.equal(externalMessageSchema.safeParse({ type: 'WP_NOPE' }).success, false);

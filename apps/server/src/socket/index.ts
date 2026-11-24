@@ -19,16 +19,16 @@ const DROP_WINDOW_MS = 60_000;
 const DROP_DISCONNECT = 100;
 
 export interface SocketLayer {
-  /** Disconnects this instance's sockets and stops timers (the HTTP server is closed by Fastify). */
-  close(): void;
+  /** Disconnects this instance's sockets, waits for their room cleanups, stops timers (Fastify closes the HTTP server). */
+  close(): Promise<void>;
 }
 
 export function attachSocket(
   httpServer: HttpServer,
-  deps: Omit<Deps, 'io' | 'timers'>,
+  deps: Omit<Deps, 'io' | 'timers' | 'cleanups'>,
   adapter?: { pub: Redis; sub: Redis },
 ): SocketLayer {
-  // Websocket only (CLAUDE.md D3): no polling => no sticky sessions and no CORS; Origin is not an auth boundary.
+  // Websocket only (docs/CODING_CONTRACT.md D3): no polling => no sticky sessions and no CORS; Origin is not an auth boundary.
   const io: IoServer = new Server(httpServer, {
     transports: ['websocket'],
     serveClient: false,
@@ -36,7 +36,7 @@ export function attachSocket(
     connectTimeout: 10_000,
   });
   if (adapter) io.adapter(createAdapter(adapter.pub, adapter.sub));
-  const d: Deps = { ...deps, io, timers: new Set() };
+  const d: Deps = { ...deps, io, timers: new Set(), cleanups: new Set() };
 
   io.on('connection', (socket) => {
     socket.data.ip = clientIp(socket.handshake.address, socket.handshake.headers['x-forwarded-for'], d.env.TRUSTED_PROXIES);
@@ -101,11 +101,12 @@ export function attachSocket(
   sweep.unref();
 
   return {
-    close() {
+    async close() {
       clearInterval(sweep);
-      for (const t of d.timers) clearTimeout(t);
+      io.local.disconnectSockets(true); // fires 'disconnect' synchronously => cleanups are registered
+      await Promise.allSettled([...d.cleanups]);
+      for (const t of d.timers) clearTimeout(t); // after cleanups: a leave can schedule a wait timer
       d.timers.clear();
-      io.local.disconnectSockets(true);
     },
   };
 }

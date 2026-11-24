@@ -1,7 +1,7 @@
 # WebRTC and Media Specification
 
 Status: v1 spec, written before implementation. This document is normative for media classification, the metadata endpoint, HLS playback, WebRTC voice, video and screen share, and TURN.
-Related: [ARCHITECTURE.md](./ARCHITECTURE.md), [SYNC_PROTOCOL.md](./SYNC_PROTOCOL.md) (PlaybackState, drift correction, MediaAdapter contract), [EXTENSION_SPEC.md](./EXTENSION_SPEC.md) (Mode B), [DEVOPS_AND_SECURITY.md](./DEVOPS_AND_SECURITY.md) (Coturn deployment, ports, rate limits, CSP), [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md), [../CLAUDE.md](../CLAUDE.md).
+Related: [ARCHITECTURE.md](./ARCHITECTURE.md), [SYNC_PROTOCOL.md](./SYNC_PROTOCOL.md) (PlaybackState, drift correction, MediaAdapter contract), [EXTENSION_SPEC.md](./EXTENSION_SPEC.md) (Mode B), [DEVOPS_AND_SECURITY.md](./DEVOPS_AND_SECURITY.md) (Coturn deployment, ports, rate limits, CSP), [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md), [CODING_CONTRACT.md](CODING_CONTRACT.md).
 
 | Module | Package or path |
 |---|---|
@@ -74,7 +74,7 @@ The hostname used below is `url.hostname.toLowerCase()`. `hostIs(host, d)` means
 | R1 | `local` / A | Sentinel: `/^local:([^/\\\u0000-\u001f]{1,255})$/` on the trimmed input. Capture group 1 is the filename. `url` is the input unchanged. |
 | R2 | `local` / A | `url.protocol === 'blob:' \|\| url.protocol === 'file:'` |
 | R3 | reject | `url.protocol` not in `{http:, https:}` returns `null`. This covers `javascript:`, `data:`, `ftp:`, `chrome:` and `about:`. Also `url.username \|\| url.password` returns `null`. |
-| R4 | `youtube` / A | Host `/^(?:www\.\|m\.\|music\.)?youtube\.com$/` and one of these: `pathname === '/watch'` with `searchParams.get('v')` matching ID; `pathname` matching `/^\/(?:shorts\|embed)\/([A-Za-z0-9_-]{11})(?:[/?#]\|$)/`. **Or** host `youtu.be` with `pathname` matching `/^\/([A-Za-z0-9_-]{11})(?:\/\|$)/`. ID regex: `/^[A-Za-z0-9_-]{11}$/`. A YouTube host without a valid ID (channel, playlist only, home page) falls through to `unknown`. |
+| R4 | `youtube` / A | Host `/^(?:www\.\|m\.\|music\.)?youtube\.com$/` and one of these: `pathname === '/watch'` with `searchParams.get('v')` matching ID; `pathname` matching `/^\/(?:shorts\|embed\|live)\/([A-Za-z0-9_-]{11})(?:[/?#]\|$)/`. **Or** host `youtu.be` with `pathname` matching `/^\/([A-Za-z0-9_-]{11})(?:\/\|$)/`. ID regex: `/^[A-Za-z0-9_-]{11}$/`. A YouTube host without a valid ID (channel, playlist only, home page) falls through to `unknown`. |
 | R5 | `drm` / B | Provider table in section 1.4. Checked against `hostname`, and against `pathname` for Amazon. |
 | R6 | `hls` / A | `/\.m3u8$/i.test(url.pathname)`, **or** `contentType` normalized (`split(';')[0].trim().toLowerCase()`) is `application/vnd.apple.mpegurl` or `application/x-mpegurl` |
 | R7 | `file` / A | `/\.(mp4\|webm\|ogg\|ogv\|mov\|m4v\|mkv)$/i.test(url.pathname)` |
@@ -117,6 +117,7 @@ The extension's static content-script match list ([EXTENSION_SPEC.md section 3.2
 | `https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42` | | `{kind:'youtube', mode:'A', youtubeId:'dQw4w9WgXcQ'}` |
 | `https://youtu.be/dQw4w9WgXcQ?si=x` | | `youtube`, `dQw4w9WgXcQ` |
 | `https://www.youtube.com/shorts/dQw4w9WgXcQ` | | `youtube` |
+| `https://www.youtube.com/live/dQw4w9WgXcQ?si=x` | | `youtube` |
 | `https://www.youtube.com/embed/dQw4w9WgXcQ` | | `youtube` |
 | `https://music.youtube.com/watch?v=dQw4w9WgXcQ` | | `youtube` |
 | `https://m.youtube.com/watch?v=dQw4w9WgXcQ` | | `youtube` |
@@ -441,7 +442,7 @@ Candidate handling:
 | `negotiationneeded` on the non-initiator | Ignored. It never offers. |
 | Peer leaves (`room:participants` no longer lists them) | `pc.close()`. Disconnect and stop that peer's audio-graph nodes. |
 | TURN credentials near expiry (`ttl - 300 s`) | Fetch `/api/turn` again and call `pc.setConfiguration({...config, iceServers})` on every PC. Only new allocations and restarts use the new credentials, and existing allocations are refreshed by the browser. |
-| Socket reconnect (new `userId`) | Close all PCs. The pairs are built again from the new participant list. |
+| Socket reconnect (new `userId`) | Close all PCs. The pairs are built again from the new participant list. The new manager adopts the old one's live mic/camera/screen streams (no re-prompt, a Mode C share survives a Wi-Fi blip) and re-sends `rtc:media`. While offline or re-joining, and for targets no longer in the room, `rtc:*` emits are dropped client-side instead of drawing FORBIDDEN. |
 
 ---
 
@@ -574,7 +575,7 @@ flowchart LR
     MS --> DST
 ```
 
-- There is one `AudioContext({ latencyHint: 'interactive' })` per page. It is created and `resume()`d on the first user gesture (join click), because of the autoplay policy.
+- There is one `AudioContext({ latencyHint: 'interactive' })` per page. It is created and `resume()`d on the first user gesture (join click), because of the autoplay policy. While suspended it is resumed on any `pointerdown`, `pointerup` (the activation event for touch) or `keydown`.
 - Per peer: `voiceGain` and `screenGain`, each with a slider from 0 to 200 % (`gain.value` 0..2), persisted in `localStorage['wp:gain:{nickname}']` inside `try/catch`. Changes use `gain.setTargetAtTime(v, ctx.currentTime, 0.015)` to avoid clicks. Mute is `gain = 0`, so the receiver keeps running and unmuting is instant.
 - **Chrome quirk (required workaround):** remote WebRTC audio sent only into Web Audio is silent unless the `MediaStream` is also attached to a media element. For each remote stream, create `const el = new Audio(); el.srcObject = stream; el.muted = true; el.play()`. It produces no sound, and keep a reference so it is not garbage-collected.
 - Output device (optional): `ctx.setSinkId(deviceId)` where supported (Chrome 110+).
@@ -696,7 +697,7 @@ await sender.setParameters(p);
 ```
 
 - Camera (slot 1): capture at `{ width: 640, height: 360, frameRate: 24 }` with `maxBitrate` 500 kbps. Above 4 peers with video on, `scaleResolutionDownBy: 2` and 250 kbps apply.
-- **Stereo Opus for screen audio:** by default Opus is negotiated mono (about 32 kbps). Before every `setLocalDescription`, the offer and the answer are both rewritten. Each `a=fmtp:<opus-pt> ...` line gets `;stereo=1;sprop-stereo=1;maxaveragebitrate=128000` appended, where the Opus payload type is found from `a=rtpmap:<pt> opus/48000/2`. This is the only SDP munging in the codebase.
+- **Stereo Opus for screen audio:** by default Opus is negotiated mono (about 32 kbps). Before every `setLocalDescription`, the offer and the answer are both rewritten. Each `a=fmtp:<opus-pt> ...` line gets `;stereo=1;sprop-stereo=1;maxaveragebitrate=128000` appended, where the Opus payload type is found from `a=rtpmap:<pt> opus/48000/2`. This is the only SDP munging in the codebase. Because the munging hits every Opus m-line, the mic sender (slot 0) is capped with `maxBitrate` 40 kbps so voice does not cost 128 kbps per peer.
 
 ### 8.3 Receiving
 

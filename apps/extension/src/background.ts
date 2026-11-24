@@ -27,11 +27,16 @@ import {
   sendToTab,
   sessionSchema,
   stripHash,
+  wpHash,
   type InternalMessage,
   type Session,
 } from './bridge';
 
-const WEB_ORIGIN = new URL(import.meta.env.VITE_WEB_URL).origin;
+// The web app is served either on its own (VITE_WEB_URL, `pnpm dev`) or by the server itself (`pnpm party`).
+const WEB_ORIGINS = new Set([new URL(import.meta.env.VITE_WEB_URL).origin, new URL(import.meta.env.VITE_SERVER_URL).origin]);
+// shortcut: any trycloudflare site may ask the extension to open a provider tab and join a room (the host's quick
+// tunnel origin changes every run); replace with a user-confirmed origin allowlist if that matters.
+const TUNNEL_SUFFIX = '.trycloudflare.com';
 const NETFLIX_HOST = /(?:^|\.)netflix\.com$/;
 
 // ---------- session storage ----------
@@ -67,16 +72,17 @@ async function writeSession(session: Session): Promise<void> {
 
 /** Points the session at `tabId`, clearing a session held by another tab (its content script leaves the room). */
 async function replaceSession(
-  m: { roomCode: string; nickname: string; mediaUrl: string; userId?: string | undefined },
+  m: { roomCode: string; nickname: string; mediaUrl: string; serverUrl: string; userId?: string | undefined },
   tabId: number,
 ): Promise<Session> {
   const old = await readSession();
   if (old && old.tabId !== null && old.tabId !== tabId) await clearSession(true);
-  const keep = old && old.tabId === tabId && old.roomCode === m.roomCode;
+  const keep = old && old.tabId === tabId && old.roomCode === m.roomCode && old.serverUrl === m.serverUrl;
   const session: Session = {
     roomCode: m.roomCode,
     nickname: m.nickname,
     mediaUrl: m.mediaUrl,
+    serverUrl: m.serverUrl,
     provider: classifyMediaUrl(m.mediaUrl)?.provider ?? null,
     tabId,
     userId: m.userId ?? (keep ? old.userId : null),
@@ -118,7 +124,7 @@ async function handoff(m: WpHandoffMessage): Promise<BridgeReply<WpHandoffReply>
       tab = await focusTab(existing);
     } else {
       const url = new URL(m.mediaUrl);
-      if (!url.hash) url.hash = `wp=${m.roomCode}`;
+      if (!url.hash) url.hash = wpHash(m.roomCode, m.serverUrl);
       tab = await chrome.tabs.create({ url: url.href, active: true });
       await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
     }
@@ -129,21 +135,22 @@ async function handoff(m: WpHandoffMessage): Promise<BridgeReply<WpHandoffReply>
   const tabId = tab.id;
 
   await replaceSession(m, tabId);
-  // An already-loaded tab has a running content script: tell it to join now. A new tab finds the session on boot.
-  if (existing) {
-    await sendToTab(tabId, { type: 'WP_SESSION_SET', roomCode: m.roomCode, nickname: m.nickname, mediaUrl: m.mediaUrl }, emptySchema);
-  }
+  // Tell the tab to join now. A new tab whose script booted before the session was stored needs this too; one that
+  // boots later finds the session itself (startSession dedupes), and a tab without a script fails harmlessly.
+  const { roomCode, nickname, mediaUrl, serverUrl } = m;
+  await sendToTab(tabId, { type: 'WP_SESSION_SET', roomCode, nickname, mediaUrl, serverUrl }, emptySchema);
   return ok({ tabId });
 }
 
 async function handleExternal(raw: unknown, sender: chrome.runtime.MessageSender): Promise<BridgeReply<unknown>> {
-  let origin: string | null = null;
+  let origin: URL | null = null;
   try {
-    origin = new URL(sender.origin ?? sender.url ?? '').origin;
+    origin = new URL(sender.origin ?? sender.url ?? '');
   } catch {
     origin = null;
   }
-  if (origin !== WEB_ORIGIN) return fail('FORBIDDEN', 'Origin not allowed');
+  const tunnel = origin?.protocol === 'https:' && origin.hostname.endsWith(TUNNEL_SUFFIX);
+  if (!origin || (!WEB_ORIGINS.has(origin.origin) && !tunnel)) return fail('FORBIDDEN', 'Origin not allowed');
   const parsed = externalMessageSchema.safeParse(raw);
   if (!parsed.success) return fail('INVALID_PAYLOAD', 'Invalid message');
   const msg = parsed.data;
@@ -196,9 +203,12 @@ async function handleInternal(msg: InternalMessage, sender: chrome.runtime.Messa
       if (tabId !== fromTab) await sendToTab(tabId, { ...msg, tabId }, emptySchema);
       return ok(session);
     }
-    case 'WP_SESSION_CLEAR':
-      await clearSession(true, fromTab);
+    case 'WP_SESSION_CLEAR': {
+      // A tab only ends its own session: a failed join in tab B must not end the party running in tab A.
+      const s = await readSession();
+      if (fromTab === undefined || s?.tabId === fromTab) await clearSession(true, fromTab);
       return ok({});
+    }
     case 'WP_MAIN_BRIDGE': {
       let host = '';
       try {
@@ -264,15 +274,12 @@ chrome.commands.onCommand.addListener((command) => {
 async function syncDynamicScript(): Promise<void> {
   const granted = await chrome.permissions.contains({ origins: ALL_SITES });
   const registered = await chrome.scripting.getRegisteredContentScripts({ ids: [DYNAMIC_SCRIPT_ID] });
+  const script = { id: DYNAMIC_SCRIPT_ID, matches: ALL_SITES, excludeMatches: PROVIDER_MATCHES, js: [contentScript] };
   if (granted && registered.length === 0) {
-    await chrome.scripting.registerContentScripts([
-      {
-        id: DYNAMIC_SCRIPT_ID,
-        matches: ALL_SITES,
-        excludeMatches: PROVIDER_MATCHES,
-        js: [contentScript],
-      },
-    ]);
+    await chrome.scripting.registerContentScripts([script]);
+  } else if (granted && registered[0]?.js?.[0] !== contentScript) {
+    // Left over from a previous version: it points at that build's hashed loader file.
+    await chrome.scripting.updateContentScripts([script]);
   } else if (!granted && registered.length > 0) {
     await chrome.scripting.unregisterContentScripts({ ids: [DYNAMIC_SCRIPT_ID] });
   }

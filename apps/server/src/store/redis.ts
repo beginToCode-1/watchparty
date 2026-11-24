@@ -11,6 +11,7 @@ const keys = (code: string) => ({
 });
 
 const MUTATE_RETRIES = 5;
+const HSET_IF_EXISTS = "if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then redis.call('HSET', KEYS[1], ARGV[1], ARGV[2]) return 1 end return 0";
 
 function parseRoom(h: Record<string, string>): RoomRecord | null {
   if (!h.meta || !h.state || !h.buffer) return null;
@@ -132,8 +133,9 @@ export class RedisStore implements RoomStore {
     const raw = await this.redis.hget(k.participants, userId);
     if (!raw) return false;
     const p = { ...(JSON.parse(raw) as ParticipantRecord), media };
-    firstReply(await this.expireAll(this.redis.multi().hset(k.participants, userId, JSON.stringify(p)), code).exec());
-    return true;
+    // HSET only if still present: a leave between the HGET and here must not resurrect the participant.
+    const m = this.redis.multi().eval(HSET_IF_EXISTS, 1, k.participants, userId, JSON.stringify(p));
+    return firstReply(await this.expireAll(m, code).exec()) === 1;
   }
 
   async appendChat(code: string, msg: ChatMessage): Promise<void> {

@@ -14,6 +14,7 @@ import {
   PLAYBACK_RATE_MIN,
   REMOTE_LOCK_TIMEOUT_MS,
   SEEK_DEBOUNCE_MS,
+  STARTUP_GRACE_MS,
   type Ack,
   type ErrorCode,
   type PlaybackState,
@@ -63,6 +64,9 @@ const SEEK_LOCK_MAX_MS = 5_000;
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 const hardSeekS = (fineRate: boolean): number => (fineRate ? DRIFT_HARD_SEEK_S : DRIFT_HARD_SEEK_COARSE_S);
+// Duck-typed: a DOMException from another realm (extension isolated world, iframe) fails `instanceof Error`.
+const isAutoplayBlock = (err: unknown): boolean =>
+  typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'NotAllowedError';
 
 /** Expected media position at server time `serverNow` (§4.2); frozen until a scheduled `updatedAt`. */
 export function expectedPosition(state: PlaybackState, serverNow: number, duration?: number | null): number {
@@ -148,6 +152,8 @@ export class SyncController {
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private bufferPhase: 'idle' | 'grace' | 'reported' = 'idle';
   private graceTimer: Timer | null = null;
+  private playStartAt = -Infinity;
+  private lastDriftSeekAt = -Infinity;
 
   private readonly offClock: () => void;
   private readonly onRoomState = (p: RoomStateEvent): void => this.applyState(p.state);
@@ -157,15 +163,22 @@ export class SyncController {
   private readonly onConnect = (): void => {
     this.lastSeq = null;
     this.roomWaiting = false;
+    // The server dropped our buffering report with the old socket: start over and re-report if still stalled.
+    if (this.graceTimer !== null) clearTimeout(this.graceTimer);
+    this.graceTimer = null;
+    this.bufferPhase = 'idle';
+    if (this.adapter && this.adapter.readyState() < 3) this.onStall();
   };
   private readonly ops = {
     play: () => {
       const a = this.adapter;
       if (!a) return;
       this.expect('play');
+      this.playStartAt = Date.now();
       a.play().catch((err: unknown) => {
         if (this.lock?.expected.delete('play') && this.lock.expected.size === 0) this.releaseLock();
-        this.opts.onAutoplayBlocked?.(err);
+        // AbortError (pause() raced the play) and adapter teardown rejections are not autoplay blocks.
+        if (isAutoplayBlock(err)) this.opts.onAutoplayBlocked?.(err);
       });
     },
     pause: () => {
@@ -256,7 +269,9 @@ export class SyncController {
       return;
     }
     if (s.mode === 'C') return;
-    const jump = prev === null || Math.abs(expectedPosition(prev, s.updatedAt) - s.position) > DRIFT_IGNORE_S;
+    // Play-after-pause is not a jump (§5.2): the sender's position ran on for INTENT_DEBOUNCE_MS before the flush.
+    const debounceS = prev?.paused && !s.paused ? (INTENT_DEBOUNCE_MS / 1000) * s.rate : 0;
+    const jump = prev === null || Math.abs(expectedPosition(prev, s.updatedAt) - s.position) > DRIFT_IGNORE_S + debounceS;
     this.apply(s, jump);
   }
 
@@ -303,7 +318,9 @@ export class SyncController {
       const target = expectedPosition(s, this.clock.serverNow(), a.getDuration());
       const threshold = jump ? DRIFT_IGNORE_S : hardSeekS(a.supportsFineRate);
       if (Math.abs(local - target) > threshold) r.seek(target + (this.clock.rtt / 2000) * s.rate);
-      if (a.isPaused()) r.play();
+      // Never play() at the end: an ended element restarts from 0.
+      const duration = a.getDuration();
+      if (a.isPaused() && (duration === null || target < duration - DRIFT_IGNORE_S)) r.play();
     });
   }
 
@@ -367,8 +384,12 @@ export class SyncController {
       case 'seeked':
       case 'ratechange':
         if (this.lock) {
-          if (this.lock.expected.delete(e) && this.lock.expected.size === 0) this.releaseLock();
-          return;
+          if (this.lock.expected.delete(e)) {
+            if (this.lock.expected.size === 0) this.releaseLock();
+            return;
+          }
+          // Unexpected seeked/ratechange are side effects of the remote action; a play/pause is the user (§5.3).
+          if (e === 'seeked' || e === 'ratechange') return;
         }
         this.onIntentEvent(e);
         return;
@@ -399,6 +420,7 @@ export class SyncController {
     if (!a || !this.current || this.current.mode === 'C') return;
     if (e === 'play' || e === 'pause') {
       if (e === 'pause' && a.isEnded()) return;
+      if (e === 'play') this.playStartAt = Date.now();
       this.pendingPlayPause = e;
       if (this.playPauseTimer !== null) clearTimeout(this.playPauseTimer);
       this.playPauseTimer = setTimeout(() => this.flushPlayPause(), INTENT_DEBOUNCE_MS);
@@ -485,6 +507,7 @@ export class SyncController {
   private onStall(): void {
     if (this.bufferPhase !== 'idle' || !this.current || this.current.mode === 'C') return;
     this.bufferPhase = 'grace';
+    const grace = Date.now() - this.playStartAt < STARTUP_GRACE_MS ? STARTUP_GRACE_MS : BUFFER_GRACE_MS;
     this.graceTimer = setTimeout(() => {
       this.graceTimer = null;
       if (this.bufferPhase !== 'grace') return;
@@ -495,7 +518,7 @@ export class SyncController {
       }
       this.bufferPhase = 'reported';
       this.transport.emit('player:buffering', { buffering: true });
-    }, BUFFER_GRACE_MS);
+    }, grace);
   }
 
   private onBufferReady(): void {
@@ -527,7 +550,7 @@ export class SyncController {
       cur.mode !== 'C' &&
       !this.lock &&
       !this.roomWaiting &&
-      this.bufferPhase !== 'reported' &&
+      this.bufferPhase === 'idle' && // a still-starting client catches up once it plays, not by seeking now
       !this.needsAttachApply &&
       !this.pendingApply &&
       !this.hasPendingIntent() &&
@@ -541,7 +564,9 @@ export class SyncController {
       drift = a.getPosition() - target;
       const c = computeCorrection(drift, cur.rate, this.clock.rtt, target, a.supportsFineRate);
       if (c.type === 'rate') this.setRateIfChanged(a, c.rate);
-      else if (c.type === 'seek') {
+      else if (c.type === 'seek' && Date.now() - this.lastDriftSeekAt >= SEEK_LOCK_MAX_MS) {
+        // Cooldown: a seek that never lands must not repeat every tick.
+        this.lastDriftSeekAt = Date.now();
         this.setRateIfChanged(a, cur.rate);
         this.withRemoteLock((r) => r.seek(c.position));
       }

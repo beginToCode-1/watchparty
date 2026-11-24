@@ -4,6 +4,7 @@ import { io, type Socket } from 'socket.io-client';
 import {
   CHAT_HISTORY_MAX,
   ROOM_CODE_ALPHABET,
+  serverUrlSchema,
   type ClientToServerEvents,
   type ErrorCode,
   type PlaybackState,
@@ -16,10 +17,12 @@ import type { HTMLVideoAdapter } from '@watchparty/sync-engine';
 import {
   COLLAPSED_KEY,
   NICKNAME_KEY,
+  SERVER_KEY,
   bareHost,
   emptySchema,
   fail,
   internalMessageSchema,
+  lastServerUrl,
   ok,
   readLocal,
   samePage,
@@ -27,6 +30,7 @@ import {
   sendToBackground,
   sessionSchema,
   stripHash,
+  wpHash,
   type InternalMessage,
 } from '../bridge';
 import { Sidebar, type SidebarActions } from './sidebar/Sidebar';
@@ -36,8 +40,8 @@ import { createAdapter, isSiteAdShowing, largeCrossOriginIframe, watchPrimaryVid
 
 type WpSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL;
-const HASH_RE = new RegExp(`(?:^#|&)wp=([${ROOM_CODE_ALPHABET}]{6})(?:&|$)`);
+// `#wp=CODE` or `#wp=CODE@host[:port]` (https server). The host charset keeps paths and credentials out.
+const HASH_RE = new RegExp(`(?:^#|&)wp=([${ROOM_CODE_ALPHABET}]{6})(?:@([A-Za-z0-9.-]+(?::[0-9]{1,5})?))?(?:&|$)`);
 const PAGE_POLL_MS = 1000;
 const IFRAME_HINT_MS = 10_000;
 const NO_VIDEO_MS = 30_000;
@@ -157,8 +161,8 @@ function unmount(): void {
 
 let conn: ReturnType<typeof connect> | null = null;
 
-function connect(roomCode: string, nickname: string) {
-  const socket: WpSocket = io(SERVER_URL, {
+function connect(roomCode: string, nickname: string, serverUrl: string) {
+  const socket: WpSocket = io(serverUrl, {
     transports: ['websocket'], // content-script requests carry the page Origin; websocket is not subject to CORS
     reconnectionDelay: 500,
     reconnectionDelayMax: 5000,
@@ -189,7 +193,7 @@ function connect(roomCode: string, nickname: string) {
         const there = bareHost(next);
         const sameHost = next.protocol === 'https:' && (there === here || there.endsWith(`.${here}`) || here.endsWith(`.${there}`));
         if (info?.mode === 'B' && info.provider !== undefined && info.provider === provider && sameHost) {
-          next.hash = `wp=${roomCode}`;
+          next.hash = wpHash(roomCode, serverUrl);
           location.assign(next.href); // reload boots us again; the session brings us back into the room
           return;
         }
@@ -246,6 +250,8 @@ function connect(roomCode: string, nickname: string) {
   }, provider !== null);
 
   const pagePoll = setInterval(() => {
+    // Orphaned by an extension reload/update: the new copy takes the seat, so this one leaves and removes its UI.
+    if (!chrome.runtime?.id) return endSession(false);
     const ad = isSiteAdShowing();
     if (ad !== adShowing && joined) {
       adShowing = ad;
@@ -299,11 +305,11 @@ function connect(roomCode: string, nickname: string) {
       const mediaUrl = stripHash(location.href);
       if (mediaUrl) {
         void sendToBackground(
-          { type: 'WP_SESSION_SET', roomCode: d.roomCode, nickname, mediaUrl, userId: d.userId },
+          { type: 'WP_SESSION_SET', roomCode: d.roomCode, nickname, mediaUrl, serverUrl, userId: d.userId },
           sessionSchema,
         );
       }
-      void chrome.storage.local.set({ [NICKNAME_KEY]: nickname }).catch(() => undefined);
+      void chrome.storage.local.set({ [NICKNAME_KEY]: nickname, [SERVER_KEY]: serverUrl }).catch(() => undefined);
       if (HASH_RE.test(location.hash)) {
         const rest = location.hash.replace(/^#/, '').split('&').filter((p) => !p.startsWith('wp=')).join('&');
         history.replaceState(history.state, '', `${location.pathname}${location.search}${rest ? `#${rest}` : ''}`);
@@ -354,8 +360,12 @@ function connect(roomCode: string, nickname: string) {
 
   return {
     roomCode,
-    socket,
+    serverUrl,
     controller,
+    /** Chat and reactions only while seated: socket.io would flush them before the reconnect's room:join. */
+    emitIfJoined: (send: (socket: WpSocket) => void): void => {
+      if (joined && socket.connected) send(socket);
+    },
     seekLocal: (seconds: number) => {
       if (!adapter) return toast('No video to seek yet');
       if (!canControl()) return toast('Only the host can control playback in this room.');
@@ -364,6 +374,7 @@ function connect(roomCode: string, nickname: string) {
     loadHere: () => {
       const mediaUrl = stripHash(location.href);
       if (!mediaUrl) return;
+      if (!joined) return toast('Reconnecting… try again in a moment.');
       set({ notice: null });
       socket.emit('player:load', { mediaUrl }, (res) => {
         if (!res.ok) toast(ERROR_TEXT[res.error.code] ?? res.error.message);
@@ -390,21 +401,22 @@ function connect(roomCode: string, nickname: string) {
   };
 }
 
-function startSession(roomCode: string, nickname: string): void {
+function startSession(roomCode: string, nickname: string, serverUrl: string): void {
   const phase = useRoom.getState().phase;
   const live = phase === 'joined' || phase === 'connecting' || phase === 'reconnecting';
-  if (conn && conn.roomCode === roomCode && live) return;
+  if (conn && conn.roomCode === roomCode && conn.serverUrl === serverUrl && live) return;
   conn?.close(true);
+  set({ serverUrl });
   mount();
-  conn = connect(roomCode, nickname);
+  conn = connect(roomCode, nickname, serverUrl);
 }
 
 function endSession(notifyBackground: boolean): void {
   conn?.close(true);
   conn = null;
   if (notifyBackground) void sendToBackground({ type: 'WP_SESSION_CLEAR' }, emptySchema);
-  const { collapsed, nickname } = useRoom.getState();
-  set({ ...initialView, collapsed, nickname });
+  const { collapsed, nickname, serverUrl } = useRoom.getState();
+  set({ ...initialView, collapsed, nickname, serverUrl });
   unmount();
 }
 
@@ -414,16 +426,16 @@ function setCollapsed(collapsed: boolean): void {
 }
 
 const actions: SidebarActions = {
-  join: (code, nickname) => startSession(code, nickname),
+  join: (code, nickname) => startSession(code, nickname, useRoom.getState().serverUrl),
   dismissPrompt: () => endSession(false),
   leave: () => endSession(true),
-  sendChat: (text) => conn?.socket.emit('chat:send', { text }),
-  sendReaction: (emoji: ReactionEmoji) => conn?.socket.emit('reaction:send', { emoji }),
+  sendChat: (text) => conn?.emitIfJoined((s) => s.emit('chat:send', { text })),
+  sendReaction: (emoji: ReactionEmoji) => conn?.emitIfJoined((s) => s.emit('reaction:send', { emoji })),
   seekTo: (seconds) => conn?.seekLocal(seconds),
   loadHere: () => conn?.loadHere(),
   goToParty: (url) => {
     const next = new URL(url);
-    if (conn) next.hash = `wp=${conn.roomCode}`;
+    if (conn) next.hash = wpHash(conn.roomCode, conn.serverUrl);
     location.assign(next.href);
   },
   resumeAutoplay: () => {
@@ -451,7 +463,7 @@ function onBackgroundMessage(
   const msg: InternalMessage = parsed.data;
   switch (msg.type) {
     case 'WP_SESSION_SET':
-      startSession(msg.roomCode, msg.nickname); // "join now"; a no-op when already in that room
+      startSession(msg.roomCode, msg.nickname, msg.serverUrl); // "join now"; a no-op when already in that room
       sendResponse(ok({}));
       break;
     case 'WP_SESSION_CLEAR':
@@ -479,18 +491,24 @@ function onBackgroundMessage(
 async function boot(): Promise<void> {
   chrome.runtime.onMessage.addListener(onBackgroundMessage);
   if (pageProvider() === 'netflix') void sendToBackground({ type: 'WP_MAIN_BRIDGE' }, emptySchema);
-  const [collapsedRaw, nicknameRaw] = await Promise.all([readLocal(COLLAPSED_KEY), readLocal(NICKNAME_KEY)]);
-  set({ collapsed: collapsedRaw === true, nickname: typeof nicknameRaw === 'string' ? nicknameRaw : '' });
+  const [collapsedRaw, nicknameRaw, serverUrl] = await Promise.all([
+    readLocal(COLLAPSED_KEY),
+    readLocal(NICKNAME_KEY),
+    lastServerUrl(),
+  ]);
+  set({ collapsed: collapsedRaw === true, nickname: typeof nicknameRaw === 'string' ? nicknameRaw : '', serverUrl });
 
   const res = await sendToBackground({ type: 'WP_SESSION_GET' }, sessionSchema.nullable());
   if (res.ok && res.data) {
-    startSession(res.data.roomCode, res.data.nickname);
+    startSession(res.data.roomCode, res.data.nickname, res.data.serverUrl);
     return;
   }
-  // Fallback #wp=CODE: prompt, never auto-join (a link from anyone must not silently seat the user).
-  const code = HASH_RE.exec(location.hash)?.[1];
-  if (code) {
-    set({ phase: 'prompt', promptCode: code, collapsed: false });
+  // Fallback #wp=CODE[@host]: prompt, never auto-join (a link from anyone must not silently seat the user). The
+  // prompt shows the server host, since the link chooses it.
+  const m = HASH_RE.exec(location.hash);
+  if (m?.[1]) {
+    const linked = m[2] === undefined ? null : serverUrlSchema.safeParse(`https://${m[2]}`);
+    set({ phase: 'prompt', promptCode: m[1], collapsed: false, ...(linked?.success ? { serverUrl: linked.data } : {}) });
     mount();
   }
 }

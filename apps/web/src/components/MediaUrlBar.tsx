@@ -4,7 +4,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { MEDIA_URL_MAX, QUEUE_TITLE_MAX, metadataSchema, type Metadata } from '@watchparty/shared-types';
 import { classifyMediaUrl } from '@watchparty/sync-engine/classify';
 import { act } from '@/lib/socket';
-import { SERVER_URL, safeHttpUrl } from '@/lib/util';
+import { safeHttpUrl, serverUrl } from '@/lib/util';
 import { canControl, useRoom } from '@/store/room';
 import { ModeBadge } from './ModeBadge';
 
@@ -26,7 +26,7 @@ export function MediaUrlBar() {
     if (!target || target.kind === 'local') return;
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
-      fetch(`${SERVER_URL}/api/metadata?${new URLSearchParams({ url: target.url }).toString()}`, { signal: ctrl.signal })
+      fetch(`${serverUrl()}/api/metadata?${new URLSearchParams({ url: target.url }).toString()}`, { signal: ctrl.signal })
         .then((r) => (r.ok ? r.json() : null))
         .then((json: unknown) => {
           const parsed = metadataSchema.safeParse(json);

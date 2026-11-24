@@ -1,4 +1,4 @@
-import { lookup } from 'node:dns/promises';
+import { Resolver } from 'node:dns/promises';
 import http, { type IncomingMessage } from 'node:http';
 import https from 'node:https';
 import { BlockList, isIP } from 'node:net';
@@ -34,6 +34,11 @@ interface Target {
   family: number;
 }
 
+// c-ares with a timeout, not dns.lookup: lookup runs on the 4-thread libuv pool with no timeout, so a few
+// never-answering names would stall every lookup in the process (ioredis reconnects included).
+// shortcut: skips /etc/hosts and the OS resolver config, fine for public targets; use lookup in a worker if that matters.
+const resolver = new Resolver({ timeout: 2_000, tries: 1 });
+
 async function resolveTarget(url: URL): Promise<Target> {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new BlockedTargetError('scheme');
   if (url.username || url.password) throw new BlockedTargetError('credentials');
@@ -44,8 +49,13 @@ async function resolveTarget(url: URL): Promise<Target> {
     if (!isPublicAddress(host)) throw new BlockedTargetError('address');
     return { address: host, family: literal };
   }
-  const addrs = await lookup(host, { all: true, verbatim: true });
+  const [v4, v6] = await Promise.all([
+    resolver.resolve4(host).catch(() => []),
+    resolver.resolve6(host).catch(() => []),
+  ]);
+  const addrs = [...v4.map((address) => ({ address, family: 4 })), ...v6.map((address) => ({ address, family: 6 }))];
   const first = addrs[0];
+  // Fail closed: unresolvable, or any non-public address (a mixed answer is a rebinding attempt).
   if (!first || addrs.some((a) => !isPublicAddress(a.address))) throw new BlockedTargetError('address');
   return first;
 }

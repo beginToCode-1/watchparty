@@ -1,6 +1,12 @@
 import { NICKNAME_MAX } from '@watchparty/shared-types';
 
-export const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? 'http://localhost:4000';
+/**
+ * Server base URL. NEXT_PUBLIC_SERVER_URL only for the split-port dev setup (`next dev` on :3000); empty means the
+ * server proxies this app, so it is this page's own origin (a tunnel URL that changes every run). Browser-only.
+ */
+export function serverUrl(): string {
+  return process.env.NEXT_PUBLIC_SERVER_URL || window.location.origin;
+}
 
 /** href/src guard (docs/DEVOPS_AND_SECURITY.md §5.2): only http(s), or blob: when `allowBlob`. */
 export function safeHttpUrl(raw: string | null | undefined, allowBlob = false): string | null {

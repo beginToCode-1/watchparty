@@ -34,6 +34,13 @@ const SEEK_SETTLE_S = 1;
 const SEEK_TIMEOUT_MS = 2_000;
 const PLAY_TIMEOUT_MS = 3_000;
 
+/** Same name as the DOMException a blocked HTMLMediaElement.play() rejects with; the controller keys off it. */
+function blockedError(): Error {
+  const e = new Error('Autoplay was blocked');
+  e.name = 'NotAllowedError';
+  return e;
+}
+
 declare global {
   interface Window {
     onYouTubeIframeAPIReady?: () => void;
@@ -81,18 +88,28 @@ export class YouTubeAdapter implements MediaAdapter {
         this.emit('canplaythrough');
         break;
       case YT.PlayerState.BUFFERING:
-        // playVideo() goes through BUFFERING first; count it as "play" unless we're mid-seek.
-        if (this.seekTarget === null && prev !== YT.PlayerState.PLAYING) this.markPlaying();
-        this.settlePendingPlay(true);
+        // Our own playVideo() goes through BUFFERING first: count it as "play". A scrub in YouTube's UI while paused
+        // also buffers and must not unpause the room; a user-initiated play is still caught at PLAYING.
+        // play() itself only resolves at PLAYING: an autoplay block also buffers first, then drops to UNSTARTED.
+        if (this.pendingPlay !== null && prev !== YT.PlayerState.PLAYING) this.markPlaying();
         this.emit('waiting');
         break;
-      case YT.PlayerState.PAUSED:
-        this.finishSeekIfSettled();
-        if (!this.logicalPaused) {
-          this.logicalPaused = true;
-          this.emit('pause');
+      case YT.PlayerState.UNSTARTED:
+        if (this.pendingPlay !== null) {
+          // Our playVideo() went BUFFERING -> UNSTARTED: the browser blocked autoplay. That is a failed play, not a
+          // user pause, so nothing is emitted (the room must not pause); the rejection shows "click to join".
+          if (prev === YT.PlayerState.BUFFERING) {
+            this.logicalPaused = true;
+            this.settlePendingPlay(false, blockedError());
+          }
+          break; // otherwise: the normal UNSTARTED that precedes BUFFERING on every start
         }
-        this.emit('canplaythrough');
+        // pauseVideo() during the very first buffer drops back to UNSTARTED, not PAUSED; without this the
+        // adapter still reports "playing" and the room's resume never calls playVideo() again.
+        this.onPaused();
+        break;
+      case YT.PlayerState.PAUSED:
+        this.onPaused();
         break;
       case YT.PlayerState.ENDED:
         this.ended = true;
@@ -109,6 +126,15 @@ export class YouTubeAdapter implements MediaAdapter {
       default:
         break;
     }
+  }
+
+  private onPaused(): void {
+    this.finishSeekIfSettled();
+    if (!this.logicalPaused) {
+      this.logicalPaused = true;
+      this.emit('pause');
+    }
+    this.emit('canplaythrough');
   }
 
   handleRateChange(): void {
@@ -155,21 +181,29 @@ export class YouTubeAdapter implements MediaAdapter {
     if (!this.ready) return Promise.reject(new Error('YouTube player not ready'));
     this.settlePendingPlay(false, new Error('superseded'));
     return new Promise<void>((resolve, reject) => {
-      // The IFrame API has no play() promise; an autoplay block shows up as "never started playing".
-      const timer = setTimeout(() => {
-        if (this.pendingPlay?.timer !== timer) return;
+      // The IFrame API has no play() promise; an autoplay block can also show up as "never started playing".
+      // Still buffering (slow network) is not a block: keep waiting.
+      const onTimeout = (): void => {
+        const p = this.pendingPlay;
+        if (p?.resolve !== resolve) return;
+        if (this.ytState === YT.PlayerState.BUFFERING) {
+          p.timer = setTimeout(onTimeout, PLAY_TIMEOUT_MS);
+          return;
+        }
         this.pendingPlay = null;
-        const blocked = new Error('Autoplay was blocked');
-        blocked.name = 'NotAllowedError';
-        reject(blocked);
-      }, PLAY_TIMEOUT_MS);
-      this.pendingPlay = { resolve, reject, timer };
+        reject(blockedError());
+      };
+      this.pendingPlay = { resolve, reject, timer: setTimeout(onTimeout, PLAY_TIMEOUT_MS) };
       this.player.playVideo();
     });
   }
 
   pause(): void {
     if (!this.ready) return;
+    // Like HTMLMediaElement: pausing aborts a play that hasn't started yet (not an autoplay block).
+    const aborted = new Error('play() was interrupted by pause()');
+    aborted.name = 'AbortError';
+    this.settlePendingPlay(false, aborted);
     this.player.pauseVideo();
   }
 

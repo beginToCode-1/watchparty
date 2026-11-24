@@ -1,7 +1,7 @@
 # Chrome Extension Specification (`@watchparty/extension`)
 
 Status: v1 spec, written before implementation. This document is normative for `apps/extension`.
-Related: [ARCHITECTURE.md](./ARCHITECTURE.md) (system overview), [SYNC_PROTOCOL.md](./SYNC_PROTOCOL.md) (clock sync, drift correction, buffering, Socket.IO payloads), [WEBRTC_AND_MEDIA.md](./WEBRTC_AND_MEDIA.md) (`classifyMediaUrl`, Mode A/B/C rules), [DEVOPS_AND_SECURITY.md](./DEVOPS_AND_SECURITY.md) (CORS, rate limits, CSP), [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md) (delivery order), [../CLAUDE.md](../CLAUDE.md) (repo rules).
+Related: [ARCHITECTURE.md](./ARCHITECTURE.md) (system overview), [SYNC_PROTOCOL.md](./SYNC_PROTOCOL.md) (clock sync, drift correction, buffering, Socket.IO payloads), [WEBRTC_AND_MEDIA.md](./WEBRTC_AND_MEDIA.md) (`classifyMediaUrl`, Mode A/B/C rules), [DEVOPS_AND_SECURITY.md](./DEVOPS_AND_SECURITY.md) (CORS, rate limits, CSP), [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md) (delivery order), [CODING_CONTRACT.md](CODING_CONTRACT.md) (repo rules).
 
 ---
 
@@ -70,7 +70,7 @@ Shared Zod schemas for bridge messages are exported from `@watchparty/shared-typ
 | `scripting` | API | `chrome.scripting.executeScript` injects the content script into an `activeTab` grant, and runs the Netflix MAIN-world bridge. `chrome.scripting.registerContentScripts` adds dynamic registration after an optional all-sites grant. | No on-demand injection, and no Netflix seeking. |
 | `host_permissions` | Hosts | The provider sites (section 3.2) get static content scripts. `VITE_SERVER_URL` lets extension pages (popup, background) call `/api/metadata` without CORS friction. | Content scripts do not auto-run on Netflix and the other providers. |
 | `optional_host_permissions` | Hosts | `https://*/*` and `http://*/*`, requested at runtime from the popup ("Enable on all sites"). | Not required. Users fall back to per-tab `activeTab`. |
-| `externally_connectable.matches` | Manifest key | Allows **only** the web app origin (`VITE_WEB_URL`) to call `chrome.runtime.sendMessage(EXTENSION_ID, ...)`. | The web app cannot detect the extension or hand off to it. |
+| `externally_connectable.matches` | Manifest key | Allows the web app origin (`VITE_WEB_URL`) **and any `https://*.trycloudflare.com` origin** (the host's quick-tunnel origin changes every run) to call `chrome.runtime.sendMessage(EXTENSION_ID, ...)`. | The web app cannot detect the extension or hand off to it. |
 | `commands` | Manifest key | `toggle-sidebar` is bound to Alt+Shift+W. It needs no permission. | Keyboard toggle only. |
 
 Explicitly **not** requested: `webRequest`, `declarativeNetRequest`, `cookies`, `history`, `<all_urls>` at install time, `debugger`, and `offscreen`. The socket lives in the content script, so no offscreen document is needed. Each of these would add install warnings or review friction for no v1 benefit.
@@ -137,7 +137,8 @@ export default defineManifest((config) => {
 Notes:
 - `minimum_chrome_version: 120` gives `chrome.storage.session` from content-adjacent contexts, `sender.origin`, `scripting` with `world: 'MAIN'`, and stable MV3 service-worker lifetime rules (each extension API event resets the 30 s idle timer).
 - `@crxjs/vite-plugin` adds the `web_accessible_resources` entries that its content-script loader needs, so do not add them by hand. For dynamic injection, `import contentScript from './content/index.tsx?script'` gives the built file path that `executeScript({ files: [contentScript] })` uses.
-- **Stable extension ID:** an unpacked extension's ID comes from its folder path. For a stable dev ID that matches `NEXT_PUBLIC_EXTENSION_ID` and server `EXTENSION_IDS`, put the public `key` in the manifest. `manifest.config.ts` does not set `key` in v1 (there is no `VITE_EXTENSION_KEY`); to pin an ID, add the `key` field to the manifest locally. The Chrome Web Store build omits it.
+- **Stable extension ID:** `manifest.config.ts` sets the manifest `key` (base64 SPKI DER of a one-off RSA-2048 key; the private half was discarded), so every unpacked copy on every machine gets the ID **`kgeaggokfampiakpipghoaeockijhbai`** (exported as `EXTENSION_ID`). Use it for `NEXT_PUBLIC_EXTENSION_ID` and server `EXTENSION_IDS`. A Chrome Web Store build would drop `key` and use the store-assigned ID.
+- **No baked-in server:** the server origin travels in the session (`WP_HANDOFF.serverUrl`, the popup's Server field, or `#wp=CODE@host`). `VITE_SERVER_URL` / `VITE_WEB_URL` are only the defaults for flows without a handoff. The manifest sets no `content_security_policy`, so nothing restricts `connect-src`; content-script websockets are not limited by `host_permissions`.
 
 ### 3.4 Access tiers at runtime
 
@@ -230,7 +231,7 @@ collect(root = document):
 | F2 | Rendered box `< 200 x 100` CSS px, or `getComputedStyle` gives `display:none`, `visibility:hidden` or `opacity < 0.1`. **Exception:** `v` is or is inside `document.fullscreenElement`. | Tracking pixels, hidden prefetch players. |
 | F3 | `v.muted && Number.isFinite(v.duration) && v.duration < 15` | Muted short previews (contract rule). |
 | F4 | `v.loop && v.muted` | Looping background or hero videos. |
-| F5 | An ancestor within 8 levels has `id` or `class` matching `AD_RE = /(^|[\s_-])(ad|ads|adv|advert|advertisement|sponsor|preroll|midroll|ima-ad|videoAdUi|ad-showing)([\s_-]|$)/i` | Ad containers. The token boundaries avoid matching `header` or `download`. |
+| F5 | An ancestor within 8 levels has `id` or `class` matching `AD_RE = /(^|[\s_-])(ad|ads|adv|advert|advertisement|sponsor|preroll|midroll|ima-ad|videoAdUi|ad-showing)([\s_-]|$)/i` | Ad containers. The token boundaries avoid matching `header` or `download`; the real regex also skips tokens preceded by `no-`/`no_` or followed by `-free`/`_free` (`no-ads`, `ads-free`, `video-ad-free` mark the main player). |
 | F6 | `v.currentSrc` host ends with one of `doubleclick.net`, `googlesyndication.com`, `imasdk.googleapis.com`, `googleads.g.doubleclick.net`, `amazon-adsystem.com`, `adnxs.com`, `springserve.com`, `innovid.com`, `tremorhub.com`, `serving-sys.com` | Ad media served from known ad CDNs. |
 
 When `duration` is `NaN` (metadata not loaded yet), F3 is skipped and the candidate is scored again on `loadedmetadata`.
@@ -272,7 +273,7 @@ Module API (`video-finder.ts`): `watchPrimaryVideo(onTarget): () => void` runs t
 | Media becomes relevant | `document.addEventListener(evt, h, { capture: true })` for `loadedmetadata`, `play`, `playing`, `emptied`, `durationchange` | Media events do not bubble, so capture is required. They are also not `composed`, so videos in open shadow roots are covered by the 2 s poll. |
 | Fullscreen | `fullscreenchange` | Immediate rescan. Also moves the sidebar host (section 6.5). |
 | Visibility or layout | `resize` (debounced 250 ms) | |
-| Safety net | `setInterval(rescan, 2000)` | Stops after 5 consecutive stable scans with a target, and restarts on any trigger above. |
+| Safety net | `setInterval(rescan, 2000)` | Stops after 5 consecutive stable scans with a target, but only when the target's root node is `document` (the observer cannot see swaps inside shadow roots or same-origin iframes); restarts on any trigger above. |
 | SPA navigation | `location.href` checked every 1000 ms, plus `popstate` | See section 8.4. |
 
 When the target changes, the content script calls `dispose()` on the old `HTMLVideoAdapter`, builds a new one for the new element, and rebuilds the `SyncController` with it. The `ClockSync` instance and the socket are kept. The new controller immediately applies the last `room:state` it received (expected position per [SYNC_PROTOCOL.md](./SYNC_PROTOCOL.md)).
@@ -313,7 +314,7 @@ For `provider === 'netflix'`, the content script overrides `HTMLVideoAdapter.see
 
 ### 5.7 Cross-origin iframes (known limitation)
 
-Some sites, typically embed-heavy mirrors, put the player in a cross-origin `<iframe>`. With `all_frames: false`, the v1 content script cannot reach it. Behavior: when no eligible target is found after 10 s, and a cross-origin iframe of at least 50 % of the viewport exists, the sidebar shows "The player is in an embedded frame" and offers **Open player in a new tab** (`window.open(iframe.src + '#wp=' + roomCode)`). The upgrade path is `all_frames: true`, with per-frame finders reporting through the background to frame 0. That needs new bridge message types, so it is deferred until there is demand.
+Some sites, typically embed-heavy mirrors, put the player in a cross-origin `<iframe>`. With `all_frames: false`, the v1 content script cannot reach it. Behavior: when no eligible target is found after 10 s, and a cross-origin iframe of at least 50 % of the viewport exists, the sidebar shows "The player is in an embedded frame" and offers **Open player in a new tab** (`window.open(iframe.src)`, plus `#wp=CODE[@host]` only when `classifyMediaUrl(iframe.src)` names a provider, so ad and other third-party frames never see the room code). The upgrade path is `all_frames: true`, with per-frame finders reporting through the background to frame 0. That needs new bridge message types, so it is deferred until there is demand.
 
 ---
 
@@ -387,7 +388,7 @@ When `document.fullscreenElement` changes:
 
 | Hop | API | Trust check |
 |---|---|---|
-| Web -> Background | `chrome.runtime.sendMessage(EXTENSION_ID, msg, cb)` -> `chrome.runtime.onMessageExternal` | `externally_connectable.matches` limits it to the web origin, **and** the background checks `sender.origin === new URL(VITE_WEB_URL).origin`. Otherwise it replies `FORBIDDEN`. |
+| Web -> Background | `chrome.runtime.sendMessage(EXTENSION_ID, msg, cb)` -> `chrome.runtime.onMessageExternal` | `externally_connectable.matches` limits it to the web origin and `*.trycloudflare.com`, **and** the background re-checks `new URL(sender.origin)`: exactly the `VITE_WEB_URL` origin, or protocol `https:` with a hostname ending in `.trycloudflare.com`. Otherwise it replies `FORBIDDEN`. |
 | Content or popup -> Background | `chrome.runtime.sendMessage(msg)` -> `chrome.runtime.onMessage` | `sender.id === chrome.runtime.id`. Content-originated types also require `sender.tab?.id`. |
 | Background -> Content | `chrome.tabs.sendMessage(tabId, msg, { frameId: 0 })` | The content script checks `sender.id === chrome.runtime.id`. |
 | Isolated -> MAIN world (Netflix) | `document.dispatchEvent(new CustomEvent('wp:seek', { detail: number }))` | One way, carrying a number only. No reply. |
@@ -409,7 +410,7 @@ type BridgeErrorCode = 'INVALID_PAYLOAD' | 'FORBIDDEN' | 'NO_SESSION' | 'TAB_ERR
 | `type` | Payload (Zod) | Reply `data` | Behavior |
 |---|---|---|---|
 | `WP_PING` | `{ type: 'WP_PING' }` | `{ version: string, hasSession: boolean }` | Detects the extension. The web app waits **800 ms**. A timeout, or `chrome.runtime.lastError` ("Could not establish connection"), means "not installed". |
-| `WP_HANDOFF` | `{ type: 'WP_HANDOFF', roomCode: string /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/, nickname: string 1..24, mediaUrl: string url, http(s) only, <= 2048 chars }` | `{ tabId: number }` | Steps in section 7.4. |
+| `WP_HANDOFF` | `{ type: 'WP_HANDOFF', roomCode: string /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/, nickname: string 1..24, mediaUrl: string url, http(s) only, <= 2048 chars, serverUrl: http(s) url, parsed to its origin }` | `{ tabId: number }` | Steps in section 7.4. |
 
 Web side (`apps/web/src/lib/extension.ts`):
 
@@ -433,8 +434,8 @@ export function sendToExtension<T>(msg: unknown, timeoutMs = 800): Promise<Bridg
 | `type` | Direction | Payload | Reply `data` | Behavior |
 |---|---|---|---|---|
 | `WP_SESSION_GET` | content or popup -> bg | `{}` | `Session \| null` | From content, returns the session only if `session.tabId === sender.tab.id`. From the popup, returns it unconditionally. |
-| `WP_SESSION_SET` | content or popup -> bg, then bg -> session tab | `{ roomCode, nickname, mediaUrl, userId?, tabId? }` | `Session` | From content, it adopts the sender tab (`tabId = sender.tab.id`). It is used after joining from `#wp=CODE`, and to record `userId` after `room:join` acks. From the popup ("Sync this tab" or the join form), `tabId` is the active tab. The background stores the session, sets the badge `ON` on that tab, and **forwards** the same message to the session tab. A content script that is not joined yet treats the forwarded message as "join now". |
-| `WP_SESSION_CLEAR` | content or popup -> bg, then bg -> session tab | `{}` | `{}` | Removes the session and the badge, and **forwards** the message to the session tab. On receiving it, the content script emits `room:leave`, disconnects the socket and unmounts the sidebar. |
+| `WP_SESSION_SET` | content or popup -> bg, then bg -> session tab | `{ roomCode, nickname, mediaUrl, serverUrl, userId?, tabId? }` | `Session` | From content, it adopts the sender tab (`tabId = sender.tab.id`). It is used after joining from `#wp=CODE`, and to record `userId` after `room:join` acks. From the popup ("Sync this tab" or the join form), `tabId` is the active tab. The background stores the session, sets the badge `ON` on that tab, and **forwards** the same message to the session tab. A content script that is not joined yet treats the forwarded message as "join now". |
+| `WP_SESSION_CLEAR` | content or popup -> bg, then bg -> session tab | `{}` | `{}` | From a tab, ignored unless that tab is the session's tab (a failed join in tab B must not end the party in tab A). Otherwise removes the session and the badge, and **forwards** the message to the session tab. On receiving it, the content script emits `room:leave`, disconnects the socket and unmounts the sidebar. |
 | `WP_SIDEBAR_TOGGLE` | bg or popup -> content | `{}` | `{ visible: boolean }` | Sent when the `toggle-sidebar` command fires and from the popup "Show sidebar" button. |
 | `WP_MAIN_BRIDGE` | content -> bg | `{}` | `{}` | Netflix only. Injects the MAIN-world seek bridge (section 5.6). Refused unless `sender.tab.url` host matches `*.netflix.com`. |
 
@@ -446,6 +447,7 @@ type Session = {
   roomCode: string;          // 6 chars, contract alphabet
   nickname: string;          // 1..24, already sanitized client-side, sanitized again server-side
   mediaUrl: string;          // the URL that was handed off
+  serverUrl: string;         // server origin the content script's socket connects to
   provider: string | null;   // classifyMediaUrl(mediaUrl)?.provider ?? null
   tabId: number | null;      // null until the tab exists
   userId: string | null;     // set after room:join ack
@@ -500,8 +502,8 @@ Background cleanup:
 
 ### 7.5 Fallback: `#wp=ROOMCODE`
 
-When `WP_SESSION_GET` returns `null`, the content script parses `location.hash` with `/(?:^#|&)wp=([ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6})(?:&|$)/`. If it matches:
-1. Show `JoinPrompt` with the nickname prefilled from `chrome.storage.local['wp:nickname']`. Joining is never automatic, because a link from anyone should not silently put the user in a room.
+When `WP_SESSION_GET` returns `null`, the content script parses `location.hash` with `/(?:^#|&)wp=([ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6})(?:@([A-Za-z0-9.-]+(?::[0-9]{1,5})?))?(?:&|$)/`. `#wp=CODE@host` means server `https://host`; plain `#wp=CODE` uses the last-used server (`chrome.storage.local['wp:server']`, zod-validated, written after each successful join) or `VITE_SERVER_URL`. Links built by the extension (handoff tab, same-provider reload, "Go back", "Open player in a new tab") carry `@host` whenever the server is `https:`. If it matches:
+1. Show `JoinPrompt` with the nickname prefilled from `chrome.storage.local['wp:nickname']` and the server host shown, since the link picks it. Joining is never automatic, because a link from anyone should not silently put the user in a room.
 2. On confirm, send `room:join`, then `WP_SESSION_SET` with this tab. Save the nickname, and remove `wp=` from the hash with `history.replaceState`, so a reload does not prompt again (the session now exists).
 
 The web app's "Copy extension link" button produces `mediaUrl + '#wp=' + roomCode`.
@@ -539,7 +541,7 @@ While `Searching`, the sidebar shows "Looking for the video...". After 30 s with
 ### 8.2 Socket configuration
 
 ```ts
-const socket = io(import.meta.env.VITE_SERVER_URL, {
+const socket = io(session.serverUrl, {   // from the handoff, popup Server field or #wp=CODE@host
   transports: ['websocket'],     // see below
   reconnectionDelay: 500,
   reconnectionDelayMax: 5000,
@@ -579,7 +581,7 @@ The full payload schemas are in [SYNC_PROTOCOL.md](./SYNC_PROTOCOL.md). This tab
 
 ## 9. Security checklist (extension)
 
-- [ ] `onMessageExternal` rejects any `sender.origin` that is not exactly the `VITE_WEB_URL` origin, even though `externally_connectable` already filters.
+- [ ] `onMessageExternal` rejects any `sender.origin` that is not exactly the `VITE_WEB_URL` origin or an `https://*.trycloudflare.com` origin, even though `externally_connectable` already filters. Known shortcut: any trycloudflare site may ask the extension to open a provider tab and join a room; replace with a user-confirmed origin allowlist if that matters.
 - [ ] Every bridge message is checked with Zod `safeParse`. Unknown `type` values return `INVALID_PAYLOAD`.
 - [ ] `WP_HANDOFF.mediaUrl` is `http(s)` only, so `javascript:`, `data:`, `chrome:` and `file:` are rejected before `tabs.create`.
 - [ ] Closed shadow root. No `dangerouslySetInnerHTML` anywhere (ESLint `react/no-danger: error`). Chat text, nicknames and titles are rendered only as React text nodes.
@@ -599,7 +601,7 @@ pnpm --filter @watchparty/extension build   # production bundle in apps/extensio
 ```
 
 1. Open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and pick `apps/extension/dist`.
-2. Copy the ID into `apps/web/.env.local` as `NEXT_PUBLIC_EXTENSION_ID=` and into server `EXTENSION_IDS=`.
+2. The ID is pinned by the manifest `key`: `kgeaggokfampiakpipghoaeockijhbai` on every machine. Put it in `apps/web/.env.local` as `NEXT_PUBLIC_EXTENSION_ID=` and in server `EXTENSION_IDS=` (the latter lets the popup's `/healthz` check pass CORS).
 3. `.env` for the extension: `VITE_SERVER_URL=http://localhost:4000` and `VITE_WEB_URL=http://localhost:3000`. These are baked in at build time, so rebuild after changing them.
 
 ### QA matrix (manual, per release)

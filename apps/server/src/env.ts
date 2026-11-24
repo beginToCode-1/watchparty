@@ -19,12 +19,26 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().min(0).max(65_535).default(4000),
   HOST: z.string().min(1).default('0.0.0.0'),
   CORS_ORIGINS: list('http://localhost:3000'),
-  EXTENSION_IDS: list(''),
+  EXTENSION_IDS: list('kgeaggokfampiakpipghoaeockijhbai'), // pinned by the extension manifest `key`
   REDIS_URL: z
     .string()
     .trim()
     .optional()
     .transform((s) => (s ? s : undefined)),
+  // Same-origin gateway: unmatched requests are proxied to the Next.js app (one tunnel, one origin). Origin only.
+  WEB_UPSTREAM: z
+    .string()
+    .trim()
+    .optional()
+    .transform((s, ctx) => {
+      if (!s) return undefined;
+      const u = URL.parse(s);
+      if (u?.protocol !== 'http:' || u.pathname !== '/' || u.search || u.username) {
+        ctx.addIssue({ code: 'custom', message: 'must be a plain http:// origin, e.g. http://127.0.0.1:3000' });
+        return z.NEVER;
+      }
+      return u;
+    }),
   TURN_SECRET: z.string().default(''),
   TURN_URLS: list('turn:localhost:3478?transport=udp,turn:localhost:3478?transport=tcp'),
   STUN_URLS: list('stun:stun.l.google.com:19302'),

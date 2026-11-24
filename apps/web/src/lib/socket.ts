@@ -8,7 +8,7 @@ import {
 } from '@watchparty/shared-types';
 import { ClockSync, SyncController, expectedPosition, type MediaAdapter, type SyncTransport } from '@watchparty/sync-engine';
 import { useRoom } from '@/store/room';
-import { SERVER_URL, rememberRoom } from './util';
+import { rememberRoom, serverUrl } from './util';
 
 export type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 type C2S = ClientToServerEvents;
@@ -37,9 +37,9 @@ export const ERROR_TEXT: Record<ErrorCode, string> = {
   INTERNAL: 'Something went wrong on the server.',
 };
 
-/** User-facing text for a room error; INTERNAL / INVALID_PAYLOAD carry the server's own (more specific) message. */
+/** User-facing text for a room error; INTERNAL / INVALID_PAYLOAD / FORBIDDEN carry the server's own (more specific) message. */
 export function errorText(e: { code: ErrorCode; message: string }): string {
-  return e.code === 'INTERNAL' || e.code === 'INVALID_PAYLOAD' ? e.message : ERROR_TEXT[e.code];
+  return e.code === 'INTERNAL' || e.code === 'INVALID_PAYLOAD' || e.code === 'FORBIDDEN' ? e.message || ERROR_TEXT[e.code] : ERROR_TEXT[e.code];
 }
 
 let socket: AppSocket | null = null;
@@ -54,7 +54,7 @@ function bindEvents(s: AppSocket, c: ClockSync): void {
     c.start();
     set({ connection: 'connected' });
     const { session, handedOff } = store();
-    // Reconnect = fresh room:join with the stored nickname; a new userId is issued (CLAUDE.md D7).
+    // Reconnect = fresh room:join with the stored nickname; a new userId is issued (docs/CODING_CONTRACT.md D7).
     if (session && !handedOff) {
       joinRoom(session.roomCode, session.nickname).catch((err: unknown) => {
         store().leaveSession();
@@ -88,7 +88,7 @@ function bindEvents(s: AppSocket, c: ClockSync): void {
 
 export function getSocket(): AppSocket {
   if (!socket) {
-    socket = io(SERVER_URL, { transports: ['websocket'], autoConnect: false });
+    socket = io(serverUrl(), { transports: ['websocket'], autoConnect: false });
     clock = new ClockSync(socket);
     bindEvents(socket, clock);
   }
@@ -99,6 +99,11 @@ export function getClock(): ClockSync {
   getSocket();
   if (!clock) throw new Error('clock not initialised');
   return clock;
+}
+
+/** Room-scoped emits only make sense on a live socket that is not mid (re-)join; else FORBIDDEN "Not in a room". */
+export function roomReady(): boolean {
+  return !!socket?.connected && !joinInFlight;
 }
 
 function ensureConnected(): Promise<AppSocket> {
@@ -160,17 +165,21 @@ export async function createRoom(nickname: string, mediaUrl?: string): Promise<s
 
 export function joinRoom(code: string, nickname: string): Promise<RoomJoinResult> {
   if (joinInFlight?.code === code) return joinInFlight.promise;
+  let flight: typeof joinInFlight = null;
+  const clear = () => {
+    if (joinInFlight === flight) joinInFlight = null;
+  };
   const promise = (async () => {
     await ensureConnected();
     const r = await request('room:join', { roomCode: code, nickname });
+    // Joined server-side: clear before applyJoin, whose React effects (startMesh -> rtc:media) may run first.
+    clear();
     useRoom.getState().applyJoin(r, nickname);
     rememberRoom(r.roomCode);
     return r;
   })();
-  joinInFlight = { code, promise };
-  const clear = () => {
-    if (joinInFlight?.promise === promise) joinInFlight = null;
-  };
+  flight = { code, promise };
+  joinInFlight = flight;
   promise.then(clear, clear);
   return promise;
 }

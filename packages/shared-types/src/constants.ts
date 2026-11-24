@@ -55,6 +55,8 @@ export const SEEK_DEBOUNCE_MS = 250;
 
 // Wait-for-buffer
 export const BUFFER_GRACE_MS = 400;
+/** Grace for a stall that starts within this long after a play start (cold start: YouTube first BUFFERING, HLS). */
+export const STARTUP_GRACE_MS = 1_500;
 export const BUFFER_TIMEOUT_MS = 8_000;
 export const RESUME_DELAY_MS = 300;
 

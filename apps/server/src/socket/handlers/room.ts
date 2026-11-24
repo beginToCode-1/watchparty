@@ -18,7 +18,7 @@ import { ipKey } from '../../lib/rateLimit.js';
 import { generateRoomCode } from '../../lib/roomCode.js';
 import { sanitizeNickname } from '../../lib/sanitize.js';
 import { AppError, type ParticipantRecord } from '../../store/types.js';
-import { broadcastParticipants, member, parse, roomChannel, toWire, userChannel, type Ctx, type Deps, type IoSocket } from './context.js';
+import { broadcastParticipants, member, parse, roomChannel, toWire, userChannel, type Ctx, type Deps, type Handler, type IoSocket } from './context.js';
 import { effective, emptyBuffer, mutatePlayback, releaseBuffering } from './player.js';
 
 const CODE_ATTEMPTS = 5;
@@ -27,17 +27,27 @@ const noMedia = () => ({ audio: false, video: false, screen: false });
 /** Remove a participant: buffer cleanup (may resume the room), host hand-off to the oldest member, broadcast. */
 async function removeUser(deps: Deps, code: string, userId: string): Promise<void> {
   const removed = await deps.store.removeParticipant(code, userId);
-  const remaining = await deps.store.listParticipants(code);
+  const before = await deps.store.listParticipants(code);
   let hostChanged = false;
-  const room = await mutatePlayback(deps, code, (r, now, fx) => {
+  let room = await mutatePlayback(deps, code, (r, now, fx) => {
     releaseBuffering(r, userId, now, fx);
     hostChanged = false;
-    const next = remaining[0];
+    const next = before[0];
     if (r.meta.hostId === userId && next) {
       r.meta.hostId = next.id;
       hostChanged = true;
     }
   });
+  // `before` may be stale (a concurrent leave on another instance): re-read, and re-pick only if the host is gone.
+  const remaining = await deps.store.listParticipants(code);
+  const fresh = remaining[0];
+  if (fresh && !remaining.some((p) => p.id === room.meta.hostId)) {
+    const res = await deps.store.mutateRoom(code, (r) => {
+      if (!remaining.some((p) => p.id === r.meta.hostId)) r.meta.hostId = fresh.id;
+    });
+    if (res) room = res.room;
+    hostChanged = true;
+  }
   if (removed || hostChanged) broadcastParticipants(deps, code, remaining, room.meta.hostId);
   if (remaining.length === 0) {
     // Empty rooms must not live for ROOM_TTL_SECONDS (create spam); keep a short reconnect grace instead.
@@ -98,15 +108,16 @@ async function reconcile(ctx: Ctx, code: string): Promise<void> {
 export function registerRoomHandlers(ctx: Ctx): void {
   const { on, socket, store } = ctx;
 
-  on('room:create', 'player', async (raw, _at, after) => {
+  const create: Handler<'room:create'> = async (raw, _at, after) => {
     const p = parse(roomCreateSchema, raw);
     const nickname = sanitizeNickname(p.nickname);
     if (!nickname) throw new AppError('INVALID_PAYLOAD', 'nickname: invalid after sanitizing');
-    const info = p.mediaUrl === undefined ? null : await classifyWithProbe(p.mediaUrl);
-    if (p.mediaUrl !== undefined && !info) throw new AppError('INVALID_PAYLOAD', 'Unsupported media URL');
+    // Rate-limit before the outbound URL probe, so create spam can't drive server-side fetches.
     if ((await store.incrCounter(`ratelimit:create:${ipKey(socket.data.ip)}`, JOIN_FAIL_WINDOW_S)) > CREATE_MAX) {
       throw new AppError('RATE_LIMITED', 'Too many rooms created, try again later');
     }
+    const info = p.mediaUrl === undefined ? null : await classifyWithProbe(p.mediaUrl);
+    if (p.mediaUrl !== undefined && !info) throw new AppError('INVALID_PAYLOAD', 'Unsupported media URL');
     await leaveCurrent(ctx);
 
     const userId = randomUUID();
@@ -133,9 +144,9 @@ export function registerRoomHandlers(ctx: Ctx): void {
       return { roomCode: code, userId, state, participants: toWire([host], userId) };
     }
     throw new Error('room code collision retries exhausted');
-  });
+  };
 
-  on('room:join', 'player', async (raw, _at, after) => {
+  const join: Handler<'room:join'> = async (raw, _at, after) => {
     const ip = ipKey(socket.data.ip);
     const joinKey = `ratelimit:join:${ip}`;
     // Reserve the attempt atomically before looking anything up: concurrent joins can't all pass a stale read,
@@ -189,7 +200,21 @@ export function registerRoomHandlers(ctx: Ctx): void {
       await store.removeParticipant(code, userId).catch(() => false);
       throw err;
     }
-  });
+  };
+
+  // One create/join at a time per socket: two overlapping ones could each bind and leave a ghost participant.
+  let joining = false;
+  const exclusive = async <T>(run: () => Promise<T>): Promise<T> => {
+    if (joining) throw new AppError('RATE_LIMITED', 'Already creating or joining a room, wait for it to finish');
+    joining = true;
+    try {
+      return await run();
+    } finally {
+      joining = false;
+    }
+  };
+  on('room:create', 'player', (raw, at, after) => exclusive(() => create(raw, at, after)));
+  on('room:join', 'player', (raw, at, after) => exclusive(() => join(raw, at, after)));
 
   on('room:leave', 'player', async (raw) => {
     parse(roomLeaveSchema, raw);
@@ -212,6 +237,9 @@ export function registerRoomHandlers(ctx: Ctx): void {
   });
 
   socket.on('disconnect', () => {
-    leaveCurrent(ctx).catch((err: unknown) => ctx.log.error({ err }, 'disconnect cleanup failed'));
+    const done = leaveCurrent(ctx)
+      .catch((err: unknown) => ctx.log.error({ err }, 'disconnect cleanup failed'))
+      .finally(() => ctx.cleanups.delete(done));
+    ctx.cleanups.add(done);
   });
 }

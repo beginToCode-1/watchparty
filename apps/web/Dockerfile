@@ -1,4 +1,4 @@
-# Build context: repo root. Requires next.config `output: 'standalone'` (docs/IMPLEMENTATION_ROADMAP.md §3.5).
+# Build context: repo root. NEXT_STANDALONE=1 below switches next.config to `output: 'standalone'` (docs/IMPLEMENTATION_ROADMAP.md §3.5).
 FROM node:24-alpine AS build
 RUN npm install -g pnpm@9.15.4
 WORKDIR /repo
@@ -6,12 +6,12 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm fetch
 COPY . .
 RUN pnpm install --offline --frozen-lockfile
-# NEXT_PUBLIC_* are inlined into the bundle at build time.
-ARG NEXT_PUBLIC_SERVER_URL=http://localhost:4000
+# NEXT_PUBLIC_* are inlined into the bundle at build time. Empty server URL = same origin (server proxies the web app).
+ARG NEXT_PUBLIC_SERVER_URL=
 ARG NEXT_PUBLIC_EXTENSION_ID=
 ENV NEXT_PUBLIC_SERVER_URL=$NEXT_PUBLIC_SERVER_URL \
     NEXT_PUBLIC_EXTENSION_ID=$NEXT_PUBLIC_EXTENSION_ID \
-    NEXT_TELEMETRY_DISABLED=1
+    NEXT_TELEMETRY_DISABLED=1 \n    NEXT_STANDALONE=1
 RUN pnpm turbo run build --filter=@watchparty/web...
 RUN mkdir -p apps/web/public
 

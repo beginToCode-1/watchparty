@@ -1,7 +1,7 @@
 # DevOps and Security Specification
 
 Status: v1 spec, written before implementation. This document is normative for storage, scaling, abuse controls, browser security policy and deployment.
-Related: [ARCHITECTURE.md](./ARCHITECTURE.md), [SYNC_PROTOCOL.md](./SYNC_PROTOCOL.md) (event semantics, buffering state machine), [EXTENSION_SPEC.md](./EXTENSION_SPEC.md) (extension trust model), [WEBRTC_AND_MEDIA.md](./WEBRTC_AND_MEDIA.md) (TURN credentials, Coturn config, SSRF-safe fetcher), [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md), [../README.md](../README.md), [../CLAUDE.md](../CLAUDE.md).
+Related: [ARCHITECTURE.md](./ARCHITECTURE.md), [SYNC_PROTOCOL.md](./SYNC_PROTOCOL.md) (event semantics, buffering state machine), [EXTENSION_SPEC.md](./EXTENSION_SPEC.md) (extension trust model), [WEBRTC_AND_MEDIA.md](./WEBRTC_AND_MEDIA.md) (TURN credentials, Coturn config, SSRF-safe fetcher), [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md), [../README.md](../README.md), [CODING_CONTRACT.md](CODING_CONTRACT.md).
 
 ---
 
@@ -54,7 +54,7 @@ flowchart LR
 
 | Key | Type | Contents | TTL | Max size | Written by |
 |---|---|---|---|---|---|
-| `room:{code}` | hash | `meta`: JSON `{ code, createdAt, hostId, hostOnlyControl }`. `state`: JSON `PlaybackState` `{ mediaUrl, mode, kind, paused, position, rate, updatedAt, seq, byUserId }`. `buffer`: JSON `{ active, userIds[], ignored[], startedAt, resumeOnClear }` (wait-for-buffer record, [SYNC_PROTOCOL.md section 8](./SYNC_PROTOCOL.md#8-wait-for-buffer)) | `ROOM_TTL_SECONDS`, refreshed | about 1.5 KiB | `room:create`, `room:settings`, host change, every state or buffer mutation |
+| `room:{code}` | hash | `meta`: JSON `{ code, hostId, hostOnlyControl }`. `state`: JSON `PlaybackState` `{ mediaUrl, mode, kind, paused, position, rate, updatedAt, seq, byUserId }`. `buffer`: JSON `{ active, userIds[], ignored[], startedAt, resumeOnClear }` (wait-for-buffer record, [SYNC_PROTOCOL.md section 8](./SYNC_PROTOCOL.md#8-wait-for-buffer)) | `ROOM_TTL_SECONDS`, refreshed | about 1.5 KiB | `room:create`, `room:settings`, host change, every state or buffer mutation |
 | `room:{code}:participants` | hash | field `userId` -> JSON `{ id, nickname, isHost, joinedAt, media:{audio,video,screen}, socketId }` | same | 12 fields x about 250 B | join, leave, disconnect, `rtc:media`, host change |
 | `room:{code}:chat` | list | JSON `chat:message` `{ id, userId, nickname, text, timestamps, at }`, oldest first | same | **200** entries (`LTRIM -200 -1`), up to about 700 B each | `chat:send` |
 | `room:{code}:queue` | list | JSON `{ id, mediaUrl, title, addedBy, kind, mode }` | same | **50** entries (`QUEUE_MAX` in shared-types) | `queue:add`, `queue:remove`, `queue:next` |
@@ -138,7 +138,7 @@ Socket.IO server options:
 
 | Option | Value | Why |
 |---|---|---|
-| `transports` | `['websocket', 'polling']` | The web app keeps the polling fallback for proxies that block WS. The extension connects with websocket only. |
+| `transports` | `['websocket']` | Server and every client are websocket-only (CODING_CONTRACT.md §7): no long-polling, so no sticky sessions and no CORS on the socket. |
 | `pingInterval` / `pingTimeout` | 25 000 / 20 000 ms | Defaults. nginx's `proxy_read_timeout` (75 s) must be larger than their sum. |
 | `maxHttpBufferSize` | 65 536 B | The largest legitimate payload is `rtc:offer` (SDP max 32 KiB, [WEBRTC_AND_MEDIA.md section 4.3](./WEBRTC_AND_MEDIA.md#43-signaling-payloads-zod-watchpartyshared-typesschemasts)). The default of 1 MB is an easy memory DoS. |
 | `connectTimeout` | 10 000 ms | |
@@ -156,7 +156,7 @@ Socket.IO server options:
 
 ### 3.3 Sticky sessions
 
-The polling transport sends several HTTP requests per session, and they must reach the **same** instance. nginx uses `hash $binary_remote_addr consistent` (section 7.3). WebSocket-only clients, such as the extension, would not need stickiness, but the hash does no harm. When replicas are added or removed, nginx must be reloaded, because it resolves `server:4000` to the replica IPs at startup. Consistent hashing moves only about 1/N of the clients.
+Not needed: the server is websocket-only, so a session is one long-lived connection to one instance. nginx still uses `hash $binary_remote_addr consistent` (section 7.3); it does no harm. When replicas are added or removed, nginx must be reloaded, because it resolves `server:4000` to the replica IPs at startup. Consistent hashing moves only about 1/N of the clients.
 
 ### 3.4 Timers across instances (buffer wait and scheduled resume)
 
@@ -172,9 +172,9 @@ The semantics are in [SYNC_PROTOCOL.md](./SYNC_PROTOCOL.md). This section define
 
 On `SIGTERM`:
 1. `/healthz` starts returning `503`, so the orchestrator or nginx stops sending new traffic.
-2. `io.close()` disconnects local sockets. Clients reconnect, usually to another instance, and rejoin.
-3. `app.close()` drains Fastify. `pub`, `sub` and the store connections `quit()`.
-4. The process exits within the 30 s `stop_grace_period`.
+2. Local sockets are disconnected and their room cleanups (leave, host hand-off, buffer release) are **awaited**. Clients reconnect, usually to another instance, and rejoin.
+3. `app.close()` drains Fastify. Only then do the store, `pub` and `sub` connections `quit()`.
+4. A 10 s force-exit timer bounds all of it (well inside the 30 s `stop_grace_period`).
 
 ---
 
@@ -312,8 +312,7 @@ const allowedOrigins = [
 | Surface | Policy |
 |---|---|
 | HTTP (`@fastify/cors`) | `origin: allowedOrigins` (exact match), `methods: ['GET']`, `credentials: false`, `maxAge: 600`. `/healthz` is the same but is only used by probes. |
-| Socket.IO `cors` (applies to the **polling** transport) | `{ origin: allowedOrigins, credentials: false }` |
-| Socket.IO `allowRequest(req, cb)` (runs on every handshake, polling or WebSocket upgrade) | If `req._query.transport === 'polling'`, require `Origin` to be in `allowedOrigins`. If the transport is `websocket`, **accept any Origin**. |
+| Socket.IO | `transports: ['websocket']` only, no `cors` option, no `allowRequest`: **any Origin is accepted** (polling is refused, so CORS never applies). |
 
 Why WebSocket accepts any Origin: the extension's content script runs inside provider pages, and Chrome sends **the page's origin** (for example `https://www.netflix.com`) on its requests ([EXTENSION_SPEC.md section 8.2](./EXTENSION_SPEC.md#82-socket-configuration)). The Origin check exists to stop cross-site WebSocket hijacking, which abuses **ambient credentials**. This server has none: no cookies, no HTTP auth, no session tied to the browser. Every capability comes from the room code and the per-socket `userId` returned in an ack, so a hostile page can do nothing it could not also do from `curl`. The rate limits in section 4 apply regardless of Origin.
 
@@ -366,7 +365,7 @@ In dev (`next dev`), `script-src` also gets `'unsafe-eval'` (React Refresh). `up
 
 ### 6.4 Client IP and trusted proxies
 
-The rule is the one in [ARCHITECTURE.md section 8.2](./ARCHITECTURE.md#82-rate-limits). The client IP is the TCP peer address (`socket.handshake.address`, Fastify `request.socket.remoteAddress`), **except** when that peer is listed in `TRUSTED_PROXIES` (comma-separated IPs/CIDRs; default `127.0.0.1/8,::1/128`, loopback only). In that case the left-most `X-Forwarded-For` entry is used. The same list drives Fastify's `trustProxy` (one `isTrusted` check in `lib/rateLimit.ts`), so HTTP and socket rate limits agree. Private ranges are **not** trusted by default: a LAN or Docker Desktop client reaching the server directly would otherwise forge `X-Forwarded-For` per connection and dodge the join lockout and the per-IP `/api/*` limits. Compose pins the `backend` network to `172.30.0.0/24` and sets `TRUSTED_PROXIES=127.0.0.1/8,::1/128,172.30.0.0/24` so nginx running as a compose service is trusted; the dev-only published server port is bound to `127.0.0.1`. This is safe because nginx **overwrites** `X-Forwarded-For` with `$remote_addr` (section 7.3), so the header holds exactly one value that the client cannot forge. Server ports are never published in production, so no client can reach the server from a trusted address while bypassing nginx.
+The rule is the one in [ARCHITECTURE.md section 8.2](./ARCHITECTURE.md#82-rate-limits). The client IP is the TCP peer address (`socket.handshake.address`, Fastify `request.socket.remoteAddress`), **except** when that peer is listed in `TRUSTED_PROXIES` (comma-separated IPs/CIDRs; default `127.0.0.1/8,::1/128`, loopback only). In that case `X-Forwarded-For` is walked from the **right**, skipping trusted hops, and the first untrusted address is the client (Fastify's `trustProxy` rule). Not the left-most entry: Cloudflare appends to a client-supplied header, so the left-most value is forgeable through a tunnel. The same list drives Fastify's `trustProxy` (one `isTrusted` check in `lib/rateLimit.ts`), so HTTP and socket rate limits agree. Private ranges are **not** trusted by default: a LAN or Docker Desktop client reaching the server directly would otherwise forge `X-Forwarded-For` per connection and dodge the join lockout and the per-IP `/api/*` limits. Compose pins the `backend` network to `172.30.0.0/24` and sets `TRUSTED_PROXIES=127.0.0.1/8,::1/128,172.30.0.0/24` so nginx running as a compose service is trusted; the dev-only published server port is bound to `127.0.0.1`. This is safe because nginx **overwrites** `X-Forwarded-For` with `$remote_addr` (section 7.3), so the header holds exactly one value that the client cannot forge. Server ports are never published in production, so no client can reach the server from a trusted address while bypassing nginx.
 
 ### 6.5 Extension CSP
 
@@ -391,6 +390,7 @@ MV3 defaults are kept: `extension_pages: "script-src 'self'; object-src 'self'"`
 | `TURN_EXTERNAL_IP` | coturn | `203.0.113.10` (or `203.0.113.10/172.18.0.5` when behind Docker NAT) | compose-level |
 | `ROOM_TTL_SECONDS`, `LOG_LEVEL` | server | `86400`, `info` | contract |
 | `TRUSTED_PROXIES` | server | `127.0.0.1/8,::1/128,172.30.0.0/24` | IPs/CIDRs whose `X-Forwarded-For` is believed (section 6.4). Server default: loopback only. |
+| `WEB_UPSTREAM` | server | `http://127.0.0.1:3000` | Optional. Same-origin gateway (section 7.5). Unset in the nginx deployment. |
 | `NEXT_PUBLIC_SERVER_URL`, `NEXT_PUBLIC_EXTENSION_ID` | web (**build args**) | `https://api.watch.example.com` | Inlined at `next build`. Changing them needs a rebuild. |
 
 ### 7.2 `docker-compose.yml` (production)
@@ -523,7 +523,7 @@ http {
   limit_conn_zone $binary_remote_addr zone=perip:10m;
 
   upstream wp_server {
-    hash $binary_remote_addr consistent;          # sticky: Socket.IO polling must hit the same instance
+    hash $binary_remote_addr consistent;          # not required (server is websocket-only); harmless
     server server:4000 max_fails=3 fail_timeout=10s;
     keepalive 32;
   }
@@ -591,7 +591,7 @@ http {
       proxy_set_header Connection $connection_upgrade;
       proxy_read_timeout 75s;                 # > pingInterval + pingTimeout (45 s)
       proxy_send_timeout 75s;
-      proxy_buffering off;                    # long-polling responses must not be buffered
+      proxy_buffering off;                    # stream websocket frames unbuffered
     }
 
     location = /api/metadata {
@@ -638,6 +638,10 @@ http {
 | 4000 | tcp | server | **no** | nginx upstream only |
 | 6379 | tcp | redis | **no** | backend network or loopback only |
 
+### 7.5 Single origin / tunnel (`WEB_UPSTREAM`)
+
+For a one-box party behind one tunnel (for example `cloudflared tunnel --url http://localhost:4000`), set `WEB_UPSTREAM=http://127.0.0.1:3000` on the server. Socket.IO (`/socket.io/`), `/healthz` and `/api/*` are served by the server itself; every other request is reverse-proxied to the Next.js app (`lib/proxy.ts`, from an `onRequest` hook before body parsing): method, path and query, streamed body and headers pass through, hop-by-hop headers are stripped, `X-Forwarded-For/Host/Proto` are **overwritten** with the values resolved under `TRUSTED_PROXIES`, and an unreachable upstream returns `502` plain text. Proxied pages keep Next's own nonce CSP (the API `default-src 'none'` CSP and CORS headers are not added). Web app and API are then same-origin, so `CORS_ORIGINS` does not need the tunnel host. No websocket proxying: run Next in production mode (`next start`, no HMR). Keep `TRUSTED_PROXIES` at its loopback default: `cloudflared` connects from localhost, and the client IP is the right-most untrusted `X-Forwarded-For` hop (section 6.4). Never expose port 3000 itself.
+
 ---
 
 ## 8. Secrets, logging and operations
@@ -674,7 +678,7 @@ Use pino `redact: ['req.query.userId', 'req.headers.authorization', 'req.headers
 - [ ] Every app key has a TTL (the CI `SCAN`/`TTL` check passes).
 - [ ] State mutations use `WATCH`/`MULTI` with retry, and `seq` is strictly monotonic under 2 instances (integration test with two server processes).
 - [ ] The `resolveOverdue()` safety net runs on every instance. Killing the instance that holds the 8 s timer mid-wait still resumes the room within 10 s.
-- [ ] nginx sticky hash is configured, and the polling fallback works with `--scale server=2` (WebSocket blocked in DevTools).
+- [ ] With `--scale server=2`, clients on different instances see each other's events (redis-adapter fan-out).
 
 **Abuse controls**
 - [ ] Every C2S event goes through `take()` before Zod parsing. The limits match section 4.2.

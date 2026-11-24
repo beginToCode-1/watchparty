@@ -91,11 +91,12 @@ function Room({ code }: { code: string }) {
     };
   }, [code, join]);
 
+  // No cleanup on a userId change: startMesh hands the live capture to the reconnected (new userId) manager.
   useEffect(() => {
-    if (!userId) return;
-    startMesh(code, userId);
-    return () => stopMesh();
+    if (userId) startMesh(code, userId);
+    else stopMesh();
   }, [code, userId]);
+  useEffect(() => stopMesh, []);
 
   if (handedOff) {
     return (

@@ -3,6 +3,36 @@
 Watch anything together. Create a room, share the 6-character code, and everyone's player stays in sync —
 with chat, emoji reactions, a shared queue and voice/video calls.
 
+## Host a party from your PC (the fast path)
+
+**Once:** install Node 24+, pnpm 9 (`npm i -g pnpm@9.15.4`) and Cloudflare's tunnel tool, then open a **new** terminal:
+
+```bash
+winget install --id Cloudflare.cloudflared
+pnpm install
+```
+
+**Party time:** from the project folder run
+
+```bash
+pnpm party
+```
+
+It builds everything, starts the app, and prints **`Share this link with your friends: https://….trycloudflare.com`**.
+Keep that window open; Ctrl+C ends the party. The link changes every run. `pnpm party --local` skips the tunnel
+(`http://localhost:4000`, this PC only); `--no-build` skips the build.
+
+**Friends:** open the link in Chrome → enter a nickname → create or join a room → paste a link.
+
+| What you watch | What each friend needs |
+| --- | --- |
+| YouTube, `.mp4`/`.webm`, `.m3u8` streams | Nothing — just the link. If their browser blocks autoplay they get **▶ Click to join playback** once. |
+| Netflix, Prime, Disney+, MovieBox, … | Their own account **and** the extension: `pnpm party` writes `watchparty-extension.zip` to the project folder — send it, they unzip it, open `chrome://extensions`, turn on Developer mode, **Load unpacked** → the unzipped folder. Then "Open with extension" in the room. |
+| Any other page | Nothing — the host shares the tab (Netflix and other DRM sites show black when shared; use the extension for those). |
+
+Voice/video and screen share connect peer-to-peer without a relay server here, so a friend on a very strict
+network (some corporate/mobile networks) may not get audio/video; playback sync and chat always work.
+
 | Mode | Media | How |
 | --- | --- | --- |
 | **A — In-app player** | HLS (`.m3u8`), video files (`.mp4 .webm .ogg .ogv .mov .m4v .mkv`), YouTube, local files | The web app plays it and keeps everyone within ~80 ms |
@@ -30,7 +60,7 @@ flowchart LR
 Design docs: [Architecture](docs/ARCHITECTURE.md) · [Sync protocol](docs/SYNC_PROTOCOL.md) ·
 [Extension](docs/EXTENSION_SPEC.md) · [WebRTC & media](docs/WEBRTC_AND_MEDIA.md) ·
 [DevOps & security](docs/DEVOPS_AND_SECURITY.md) · [Roadmap](docs/IMPLEMENTATION_ROADMAP.md) ·
-[Contributor/agent contract](CLAUDE.md)
+[Contributor/agent contract](docs/CODING_CONTRACT.md)
 
 ---
 
@@ -111,6 +141,7 @@ pnpm install
 cp apps/server/.env.example    apps/server/.env
 cp apps/web/.env.example       apps/web/.env.local
 cp apps/extension/.env.example apps/extension/.env
+echo NEXT_PUBLIC_SERVER_URL=http://localhost:4000 > apps/web/.env.development.local   # next dev on :3000 -> server :4000
 
 # 3. build the shared packages once (turbo does this automatically for `pnpm dev` too)
 pnpm build
@@ -125,6 +156,7 @@ PowerShell equivalent of step 2:
 Copy-Item apps/server/.env.example apps/server/.env
 Copy-Item apps/web/.env.example apps/web/.env.local
 Copy-Item apps/extension/.env.example apps/extension/.env
+Set-Content apps/web/.env.development.local 'NEXT_PUBLIC_SERVER_URL=http://localhost:4000' -Encoding ascii
 ```
 
 Verify:
@@ -167,7 +199,7 @@ value stops the server with a message naming the variable.
 | `PORT` | `4000` | no | HTTP + Socket.IO port |
 | `HOST` | `0.0.0.0` | no | Bind address. Use `127.0.0.1` to keep it off the LAN |
 | `CORS_ORIGINS` | `http://localhost:3000` | no | Comma-separated origins allowed on HTTP routes (`/api/*`). Must include the web app origin exactly (scheme + host + port) |
-| `EXTENSION_IDS` | *(empty)* | for extension popup HTTP calls | Comma-separated Chrome extension IDs; each becomes an allowed origin `chrome-extension://<id>` |
+| `EXTENSION_IDS` | `kgeaggokfampiakpipghoaeockijhbai` (the pinned ID) | for extension popup HTTP calls | Comma-separated Chrome extension IDs; each becomes an allowed origin `chrome-extension://<id>` |
 | `REDIS_URL` | *(unset)* | no | e.g. `redis://localhost:6379`. Unset ⇒ in-memory store, single instance. Set ⇒ Redis store **and** `@socket.io/redis-adapter`, so you can run several instances |
 | `TURN_SECRET` | *(empty)* | for TURN | Shared secret, identical to coturn's `static-auth-secret`. Empty ⇒ `/api/turn` returns STUN servers only |
 | `TURN_URLS` | `turn:localhost:3478?transport=udp,turn:localhost:3478?transport=tcp` | no | Comma-separated TURN URLs handed to clients (ignored when `TURN_SECRET` is empty) |
@@ -175,6 +207,7 @@ value stops the server with a message naming the variable.
 | `ROOM_TTL_SECONDS` | `86400` | no | Idle lifetime of a room and all its keys; refreshed on every activity |
 | `LOG_LEVEL` | `info` | no | Fastify/pino level: `fatal` `error` `warn` `info` `debug` `trace` `silent` (JSON logs) |
 | `TRUSTED_PROXIES` | `127.0.0.1/8,::1/128` | behind a proxy | Comma-separated IPs/CIDRs of your reverse proxy. `X-Forwarded-For` is used for the client IP (rate limits, join lockout) **only** when the TCP peer is in this list. Compose sets `127.0.0.1/8,::1/128,172.30.0.0/24` (its `backend` network). Never list a range untrusted clients can connect from |
+| `WEB_UPSTREAM` | *(unset)* | for one-tunnel hosting | Plain `http://` origin of the Next.js app, e.g. `http://127.0.0.1:3000`. Set ⇒ every request the server does not handle itself (`/socket.io/`, `/healthz`, `/api/*`) is reverse-proxied there, so one tunnel (`cloudflared tunnel --url http://localhost:4000`) serves web app + API + socket from one origin. Run the web app with `next start` (no HMR websocket through the proxy). Upstream down ⇒ `502` |
 
 Example:
 
@@ -189,13 +222,14 @@ TURN_URLS=turn:localhost:3478?transport=udp,turn:localhost:3478?transport=tcp
 STUN_URLS=stun:stun.l.google.com:19302
 ROOM_TTL_SECONDS=86400
 LOG_LEVEL=info
+# WEB_UPSTREAM=http://127.0.0.1:3000
 ```
 
 ### 4.2 Web — `apps/web/.env.local`
 
 | Variable | Default | Required | Description |
 | --- | --- | --- | --- |
-| `NEXT_PUBLIC_SERVER_URL` | `http://localhost:4000` | yes | Base URL of the server for Socket.IO and `/api/*` |
+| `NEXT_PUBLIC_SERVER_URL` | *(empty)* | no | Base URL of the server for Socket.IO and `/api/*`. Empty ⇒ same origin, resolved at runtime from the page URL (the server proxies the web app via `WEB_UPSTREAM`, e.g. one Cloudflare tunnel → `:4000`). Set `http://localhost:4000` only for `next dev` on `:3000` — put it in `apps/web/.env.development.local`, which `next build` never reads |
 | `NEXT_PUBLIC_EXTENSION_ID` | *(empty)* | for Mode B | ID of the installed extension (see [§7](#7-loading-the-chrome-extension-unpacked)). Empty ⇒ the Mode B panel shows install steps only |
 
 ### 4.3 Extension — `apps/extension/.env`
@@ -296,14 +330,17 @@ Run from the repo root unless stated.
 | `pnpm --filter @watchparty/sync-engine test` | Sync engine unit tests only |
 | `pnpm --filter <pkg> add <dep>` | Add a dependency to one package |
 
-**Milestone gate** (required by [CLAUDE.md](CLAUDE.md)): `pnpm typecheck && pnpm build && pnpm test`.
+**Milestone gate** (required by [docs/CODING_CONTRACT.md](docs/CODING_CONTRACT.md)): `pnpm typecheck && pnpm build && pnpm test`.
 
 ---
 
 ## 7. Loading the Chrome extension (unpacked)
 
-1. **Set the extension env.** Make sure `apps/extension/.env` points at your server and web app
-   (`VITE_SERVER_URL=http://localhost:4000`, `VITE_WEB_URL=http://localhost:3000`).
+1. **Set the extension env (optional).** `apps/extension/.env` holds only the *defaults* for local dev
+   (`VITE_SERVER_URL=http://localhost:4000`, `VITE_WEB_URL=http://localhost:3000`). The real server comes at runtime:
+   from the web app's handoff, from the popup's **Server** field (remembered after the first successful join), or
+   from a `#wp=CODE@host` link. So one build works for any Cloudflare quick tunnel (`https://<random>.trycloudflare.com`),
+   whose address changes every run; friends can load the same `dist` folder unchanged.
 2. **Build it.**
    ```bash
    pnpm --filter @watchparty/extension build
@@ -314,13 +351,10 @@ Run from the repo root unless stated.
 5. **Load unpacked.** Click **Load unpacked** and select the folder `apps/extension/dist`
    (full path e.g. `D:\strreaming platform\apps\extension\dist`). Select the `dist` folder itself, not
    `apps/extension`.
-6. **Copy the ID.** The card shows an **ID** (32 letters a–p). Chrome derives an unpacked extension's ID from its
-   folder path, so it stays the same as long as you load the same path. (To pin one ID across machines, the manifest
-   needs a `key` field; see [docs/EXTENSION_SPEC.md](docs/EXTENSION_SPEC.md).)
-7. **Tell the web app and server about it.**
-   - `apps/web/.env.local`: `NEXT_PUBLIC_EXTENSION_ID=<id>`
-   - `apps/server/.env`: `EXTENSION_IDS=<id>` (comma-separate several IDs for teammates)
-8. **Restart** `pnpm dev` (or the web and server processes) so the new values are picked up.
+6. **Check the ID.** The manifest pins it with a public `key`, so every copy on every machine shows
+   **`kgeaggokfampiakpipghoaeockijhbai`**, whatever folder it is loaded from.
+7. **Nothing to configure.** The web app (`NEXT_PUBLIC_EXTENSION_ID`) and server (`EXTENSION_IDS`) default to this ID.
+8. **Reload** the web page so it detects the extension.
 9. **Pin it.** Click the puzzle icon in the toolbar and pin WatchParty. The popup shows the server status and the
    current session, if any.
 10. **Check the bridge.** Open a room at <http://localhost:3000>; the room header shows "Extension connected"
@@ -334,10 +368,11 @@ After code changes:
 - With `pnpm --filter @watchparty/extension dev` running, most changes reload automatically; content-script
   changes need a reload of the streaming tab.
 - After `build`, click the **reload** icon on the extension card, then reload the streaming tab.
-- If you changed `VITE_WEB_URL` or `VITE_SERVER_URL`, rebuild **and** reload — they are baked into the manifest.
+- If you changed `VITE_WEB_URL` or `VITE_SERVER_URL` (the local-dev defaults), rebuild **and** reload.
 
 Permissions you will see: `storage`, `tabs`, `activeTab`, `scripting`, and host access to the supported streaming sites plus
-`VITE_SERVER_URL`. Details and rationale: [docs/EXTENSION_SPEC.md](docs/EXTENSION_SPEC.md).
+`VITE_SERVER_URL`. Besides `VITE_WEB_URL`, any `https://*.trycloudflare.com` page may talk to the extension (to
+hand off a room); see the shortcut note in [docs/EXTENSION_SPEC.md](docs/EXTENSION_SPEC.md) §9. Details and rationale: [docs/EXTENSION_SPEC.md](docs/EXTENSION_SPEC.md).
 
 ---
 

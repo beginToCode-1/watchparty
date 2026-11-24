@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import type { PlaybackState } from '@watchparty/shared-types';
+import { test, type TestContext } from 'node:test';
+import { CLOCK_READY_TIMEOUT_MS, STARTUP_GRACE_MS, type PlaybackState } from '@watchparty/shared-types';
 import { ClockSync, computeClockSample, type SyncTransport } from './clock.js';
 import { classifyMediaUrl } from './classify.js';
 import {
@@ -9,20 +9,26 @@ import {
   expectedPosition,
   type MediaAdapter,
   type MediaAdapterEvent,
+  type SyncControllerOptions,
 } from './controller.js';
 import { formatTimecode, parseTimecode } from './timecode.js';
 
 class FakeTransport implements SyncTransport {
   sent: { event: string; payload: unknown }[] = [];
+  private readonly handlers = new Map<string, (p: never) => void>();
   emit(event: string, payload: unknown, _ack?: unknown): unknown {
     this.sent.push({ event, payload });
     return this;
   }
-  on(): unknown {
+  on(event: string, listener: (p: never) => void): unknown {
+    this.handlers.set(event, listener);
     return this;
   }
   off(): unknown {
     return this;
+  }
+  fire(event: string, payload?: unknown): void {
+    (this.handlers.get(event) as ((p: unknown) => void) | undefined)?.(payload);
   }
 }
 
@@ -32,9 +38,12 @@ class FakeAdapter implements MediaAdapter {
   paused = true;
   rate = 1;
   ready = 4;
+  duration: number | null = 3600;
+  plays = 0;
+  seeks: number[] = [];
   private readonly cbs = new Map<MediaAdapterEvent, Set<() => void>>();
   getPosition = (): number => this.pos;
-  getDuration = (): number | null => 3600;
+  getDuration = (): number | null => this.duration;
   getRate = (): number => this.rate;
   isPaused = (): boolean => this.paused;
   seeking = false;
@@ -42,6 +51,7 @@ class FakeAdapter implements MediaAdapter {
   isEnded = (): boolean => false;
   readyState = (): number => this.ready;
   play(): Promise<void> {
+    this.plays++;
     this.paused = false;
     return Promise.resolve();
   }
@@ -49,6 +59,7 @@ class FakeAdapter implements MediaAdapter {
     this.paused = true;
   }
   seek(s: number): void {
+    this.seeks.push(s);
     this.pos = s;
   }
   setRate(r: number): void {
@@ -141,6 +152,7 @@ test('classifyMediaUrl', () => {
     ['https://youtu.be/dQw4w9WgXcQ?si=x', undefined, { kind: 'youtube', youtubeId: 'dQw4w9WgXcQ' }],
     ['https://www.youtube.com/shorts/dQw4w9WgXcQ', undefined, { kind: 'youtube', youtubeId: 'dQw4w9WgXcQ' }],
     ['https://www.youtube.com/embed/dQw4w9WgXcQ', undefined, { kind: 'youtube', youtubeId: 'dQw4w9WgXcQ' }],
+    ['https://www.youtube.com/live/dQw4w9WgXcQ?si=x', undefined, { kind: 'youtube', youtubeId: 'dQw4w9WgXcQ' }],
     ['https://music.youtube.com/watch?v=dQw4w9WgXcQ', undefined, { kind: 'youtube', mode: 'A' }],
     ['https://m.youtube.com/watch?v=dQw4w9WgXcQ', undefined, { kind: 'youtube', mode: 'A' }],
     ['https://www.youtube.com/watch?v=short', undefined, { kind: 'unknown', mode: 'C' }],
@@ -245,6 +257,7 @@ test('controller: remote lock, debounce, stale seq, buffering grace', (t) => {
   t.mock.timers.tick(300);
   assert.deepEqual(intents(), ['player:play']);
 
+  t.mock.timers.tick(STARTUP_GRACE_MS); // leave the startup window of the play above
   // buffering: 300 ms stall => nothing, >400 ms => report, playing => clear
   transport.sent = [];
   adapter.ready = 2;
@@ -273,4 +286,114 @@ test('controller: remote lock, debounce, stale seq, buffering grace', (t) => {
   t.mock.timers.tick(300);
   assert.deepEqual(intents(), []);
   ctl.destroy();
+});
+
+/** Controller on a paused FakeAdapter with a usable clock (offset 0, rtt 0), mocked time. */
+function setup(t: TestContext, opts: Partial<SyncControllerOptions> = {}) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 10_000 });
+  const transport = new FakeTransport();
+  const clock = new ClockSync(transport, () => Date.now());
+  clock.addSample(Date.now(), Date.now(), Date.now(), Date.now());
+  const adapter = new FakeAdapter();
+  const ctl = new SyncController({ transport, clock, adapter, ...opts });
+  t.mock.timers.tick(CLOCK_READY_TIMEOUT_MS);
+  const sent = (event: string): unknown[] => transport.sent.filter((s) => s.event === event).map((s) => s.payload);
+  t.after(() => ctl.destroy());
+  return { transport, adapter, ctl, sent };
+}
+const flushMicrotasks = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+test('controller: only NotAllowedError is an autoplay block', async (t) => {
+  const blocked: unknown[] = [];
+  const { adapter, ctl } = setup(t, { onAutoplayBlocked: (e) => blocked.push(e) });
+  const rejectWith = (name: string): void => {
+    adapter.play = (): Promise<void> => Promise.reject(Object.assign(new Error(name), { name }));
+  };
+  rejectWith('AbortError'); // pause() raced the play: normal wait-for-buffer flow
+  ctl.applyState(state({ paused: false, position: 10, updatedAt: Date.now(), seq: 1 }));
+  await flushMicrotasks();
+  assert.equal(blocked.length, 0);
+  rejectWith('NotAllowedError');
+  ctl.applyState(state({ paused: false, position: 10, updatedAt: Date.now(), seq: 2 }));
+  await flushMicrotasks();
+  assert.equal(blocked.length, 1);
+});
+
+test('controller: play after pause is not a jump; a real jump seeks', (t) => {
+  const { adapter, ctl } = setup(t);
+  adapter.pos = 30;
+  ctl.applyState(state({ paused: true, position: 30, seq: 1 }));
+  t.mock.timers.tick(300);
+  // the sender's element ran ~150 ms during the intent debounce
+  ctl.applyState(state({ paused: false, position: 30.15, updatedAt: Date.now(), seq: 2 }));
+  assert.deepEqual(adapter.seeks, []);
+  assert.equal(adapter.paused, false);
+  ctl.applyState(state({ paused: false, position: 100, updatedAt: Date.now(), seq: 3 }));
+  assert.equal(adapter.seeks.length, 1);
+});
+
+test('controller: drift hard seeks have a cooldown', (t) => {
+  const { adapter, ctl } = setup(t);
+  adapter.seek = (s: number): void => void adapter.seeks.push(s); // the seek never lands
+  ctl.applyState(state({ paused: false, position: 10, updatedAt: Date.now(), seq: 1 }));
+  assert.equal(adapter.seeks.length, 1); // the apply itself
+  // Small steps: mocked Date.now() only advances once per tick() call.
+  const advance = (ms: number): void => {
+    for (let i = 0; i < ms; i += 100) t.mock.timers.tick(100);
+  };
+  advance(4_900);
+  assert.equal(adapter.seeks.length, 2); // one drift seek, then cooldown
+  advance(600);
+  assert.equal(adapter.seeks.length, 3);
+});
+
+test('controller: a user pause while the remote lock is held is an intent', (t) => {
+  const { adapter, ctl, sent } = setup(t);
+  ctl.applyState(state({ paused: false, position: 10, updatedAt: Date.now(), seq: 1 })); // seek + play under lock
+  adapter.fire('play'); // expected echo
+  assert.equal(ctl.isRemoteAction(), true); // still waiting for 'seeked'
+  adapter.paused = true;
+  adapter.fire('pause');
+  t.mock.timers.tick(150);
+  assert.deepEqual(sent('player:pause'), [{ position: 10 }]);
+  assert.deepEqual(sent('player:play'), []);
+});
+
+test('controller: an ended video is not restarted', (t) => {
+  const { adapter, ctl } = setup(t);
+  adapter.duration = 100;
+  adapter.pos = 100;
+  ctl.applyState(state({ paused: false, position: 100, updatedAt: Date.now() - 5_000, seq: 1 }));
+  assert.equal(adapter.plays, 0);
+  assert.equal(adapter.paused, true);
+});
+
+test('controller: startup grace delays the buffering report', (t) => {
+  const { adapter, ctl, sent } = setup(t);
+  ctl.applyState(state({ paused: false, position: 0, updatedAt: Date.now(), seq: 1 }));
+  adapter.fire('play');
+  adapter.ready = 2;
+  adapter.fire('waiting'); // cold start
+  t.mock.timers.tick(STARTUP_GRACE_MS - 1);
+  assert.deepEqual(sent('player:buffering'), []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(sent('player:buffering'), [{ buffering: true }]);
+  adapter.ready = 4;
+  adapter.fire('playing');
+  t.mock.timers.tick(STARTUP_GRACE_MS);
+  adapter.ready = 2;
+  adapter.fire('waiting'); // mid-playback stall: normal 400 ms grace
+  t.mock.timers.tick(400);
+  assert.deepEqual(sent('player:buffering'), [{ buffering: true }, { buffering: false }, { buffering: true }]);
+});
+
+test('controller: reconnect while stalled re-reports buffering', (t) => {
+  const { transport, adapter, ctl, sent } = setup(t);
+  ctl.applyState(state({ paused: true, position: 0, seq: 1 }));
+  adapter.ready = 2;
+  adapter.fire('waiting');
+  t.mock.timers.tick(400);
+  transport.fire('connect');
+  t.mock.timers.tick(400);
+  assert.deepEqual(sent('player:buffering'), [{ buffering: true }, { buffering: true }]);
 });

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { ReactionEmoji } from '@watchparty/shared-types';
-import { formatTimecode } from '@watchparty/sync-engine';
-import { bareHost } from '../../bridge';
+import { classifyMediaUrl, formatTimecode } from '@watchparty/sync-engine';
+import { bareHost, webUrlFor, wpHash } from '../../bridge';
 import { Chat } from './Chat';
 import { Check, ChevronLeft, ChevronRight, Copy } from './icons';
 import { JoinPrompt, primaryButton, secondaryButton } from './JoinPrompt';
@@ -9,8 +9,6 @@ import { Participants } from './Participants';
 import { FloatingReactions, ReactionBar } from './Reactions';
 import { useRoom, type Notice } from './store';
 import { SyncStatus } from './SyncStatus';
-
-const WEB_URL = import.meta.env.VITE_WEB_URL;
 
 /** Callbacks into content/index.tsx, which owns the socket. */
 export interface SidebarActions {
@@ -34,6 +32,7 @@ const smallButton =
   'rounded-full px-3 py-1 text-[12px] font-semibold transition-transform duration-100 active:scale-[0.95]';
 
 function NoticeCard({ notice, actions, roomCode }: { notice: Notice; actions: SidebarActions; roomCode: string | null }) {
+  const serverUrl = useRoom((s) => s.serverUrl);
   let body: string;
   let buttons: { label: string; onClick: () => void; primary?: boolean }[] = [];
   switch (notice.kind) {
@@ -48,7 +47,7 @@ function NoticeCard({ notice, actions, roomCode }: { notice: Notice; actions: Si
       body = `The party switched to ${bareHost(notice.url)}.`;
       buttons = [
         ...(roomCode
-          ? [{ label: 'Open in web app', onClick: () => void window.open(`${WEB_URL}/room/${roomCode}`, '_blank'), primary: true }]
+          ? [{ label: 'Open in web app', onClick: () => void window.open(`${webUrlFor(serverUrl)}/room/${roomCode}`, '_blank'), primary: true }]
           : []),
         { label: 'Dismiss', onClick: actions.dismissNotice },
       ];
@@ -58,7 +57,12 @@ function NoticeCard({ notice, actions, roomCode }: { notice: Notice; actions: Si
       buttons = [
         {
           label: 'Open player in a new tab',
-          onClick: () => void window.open(`${notice.src.split('#')[0] ?? notice.src}#wp=${roomCode ?? ''}`, '_blank'),
+          // Only a known provider's frame gets the room code; ad and other third-party frames must not see it.
+          onClick: () => {
+            const src = notice.src.split('#')[0] ?? notice.src;
+            const tag = roomCode && classifyMediaUrl(src)?.provider ? `#${wpHash(roomCode, serverUrl)}` : '';
+            void window.open(`${src}${tag}`, '_blank');
+          },
           primary: true,
         },
         { label: 'Dismiss', onClick: actions.dismissNotice },

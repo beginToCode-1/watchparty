@@ -39,7 +39,9 @@ test('keyed limiter returns Retry-After seconds', () => {
 test('client IP and rate-limit key', () => {
   const loopback = proxyList(['127.0.0.1/8', '::1/128']); // TRUSTED_PROXIES default
   assert.equal(clientIp('::ffff:203.0.113.9', '1.2.3.4', loopback), '203.0.113.9'); // public peer: XFF ignored
-  assert.equal(clientIp('127.0.0.1', '198.51.100.7, 10.0.0.1', loopback), '198.51.100.7'); // our proxy: first hop
+  // Cloudflare tunnel: "<client-supplied>, <real client>" from loopback cloudflared => the hop the edge appended.
+  assert.equal(clientIp('127.0.0.1', '6.6.6.6, 198.51.100.7', loopback), '198.51.100.7');
+  assert.equal(clientIp('127.0.0.1', '198.51.100.7, 127.0.0.1', loopback), '198.51.100.7'); // chained trusted proxies
   assert.equal(clientIp('::ffff:127.0.0.1', '198.51.100.7', loopback), '198.51.100.7');
   assert.equal(clientIp('192.168.1.5', '1.2.3.4', loopback), '192.168.1.5'); // LAN / Docker peer: no spoofing by default
   assert.equal(clientIp('172.30.0.9', '1.2.3.4', proxyList(['172.30.0.0/24'])), '1.2.3.4'); // compose nginx when listed
