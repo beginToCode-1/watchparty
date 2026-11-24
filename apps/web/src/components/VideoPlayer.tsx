@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import type Hls from 'hls.js';
 import type { HlsConfig } from 'hls.js';
 import type { MediaKind } from '@watchparty/shared-types';
@@ -101,8 +101,9 @@ function attachHls(HlsCtor: typeof Hls, video: HTMLVideoElement, src: string, on
   };
 }
 
-export function VideoPlayer({ src, kind }: { src: string; kind: MediaKind }) {
-  const ref = useRef<HTMLVideoElement>(null);
+export function VideoPlayer({ src, kind, videoRef }: { src: string; kind: MediaKind; videoRef?: RefObject<HTMLVideoElement | null> }) {
+  const ownRef = useRef<HTMLVideoElement>(null);
+  const ref = videoRef ?? ownRef;
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {

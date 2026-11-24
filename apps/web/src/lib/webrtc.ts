@@ -251,20 +251,42 @@ class MeshManager {
       // Focus behavior can only be set right after the picker; later calls throw and are harmless.
     }
     const video = stream.getVideoTracks()[0];
-    const audio = stream.getAudioTracks()[0] ?? null;
     if (!video) {
       stopAll(stream);
       return false;
     }
-    video.contentHint = 'motion';
-    if (audio) audio.contentHint = 'music';
     video.addEventListener('ended', () => this.stopScreenShare());
+    this.setScreenStream(stream);
+    return true;
+  }
+
+  /** Streams a playing local file to the room over the screen slots (friends without the file watch this). */
+  shareVideoElement(el: HTMLVideoElement): boolean {
+    if (this.flags.screen) return false;
+    // HTMLMediaElement.captureStream (Chromium) is not in TypeScript's DOM lib yet.
+    const capture: unknown = Reflect.get(el, 'captureStream');
+    if (typeof capture !== 'function') return false;
+    const stream = (capture as () => MediaStream).call(el);
+    // Tracks can appear after the capture starts (e.g. audio once decoding begins).
+    stream.addEventListener('addtrack', () => {
+      if (this.screenStream !== stream) return;
+      this.replaceAll(SLOT_SCREEN);
+      this.replaceAll(SLOT_SCREEN_AUDIO);
+    });
+    this.setScreenStream(stream);
+    return true;
+  }
+
+  private setScreenStream(stream: MediaStream): void {
+    const video = stream.getVideoTracks()[0];
+    const audio = stream.getAudioTracks()[0] ?? null;
+    if (video) video.contentHint = 'motion';
+    if (audio) audio.contentHint = 'music';
     this.screenStream = stream;
     this.replaceAll(SLOT_SCREEN);
     this.replaceAll(SLOT_SCREEN_AUDIO);
     useRoom.getState().patchCall({ localScreen: stream, screenNoAudio: audio === null });
     this.setFlags({ screen: true });
-    return true;
   }
 
   stopScreenShare(): void {

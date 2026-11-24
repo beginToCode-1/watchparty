@@ -96,14 +96,19 @@ await waitFor(`http://127.0.0.1:${SERVER_PORT}/healthz`, 'Server');
 await waitFor(`http://127.0.0.1:${SERVER_PORT}/`, 'Web app (through the server)');
 say(`Running locally: http://localhost:${SERVER_PORT}`);
 
+// winget's install dir too: terminals opened before the install (e.g. VS Code's) still have the old PATH.
+const cloudflared = ['cloudflared', 'C:\\Program Files (x86)\\cloudflared\\cloudflared.exe', 'C:\\Program Files\\cloudflared\\cloudflared.exe'].find(
+  (bin) => spawnSync(bin, ['--version']).status === 0,
+);
+
 if (args.has('--local')) {
   say('Local only (--local). Press Ctrl+C to stop.');
-} else if (spawnSync('cloudflared', ['--version']).status !== 0) {
+} else if (!cloudflared) {
   say('`cloudflared` is not installed, so friends cannot reach this yet.');
   say('Install it once:  winget install --id Cloudflare.cloudflared   then open a new terminal and run  pnpm party  again.');
 } else {
   say('Opening a public tunnel…');
-  const tunnel = run('cloudflared', 'cloudflared', ['tunnel', '--no-autoupdate', '--url', `http://localhost:${SERVER_PORT}`], {
+  const tunnel = run('cloudflared', cloudflared, ['tunnel', '--no-autoupdate', '--url', `http://localhost:${SERVER_PORT}`], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let shown = false;
