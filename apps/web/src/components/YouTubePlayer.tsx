@@ -35,7 +35,8 @@ export function YouTubePlayer({ videoId }: { videoId: string }) {
           videoId,
           width: '100%',
           height: '100%',
-          playerVars: { playsinline: 1, rel: 0, modestbranding: 1, origin: window.location.origin },
+          // fs 0: fullscreen goes through the room's stage button so cam bubbles stay on top.
+          playerVars: { playsinline: 1, rel: 0, modestbranding: 1, fs: 0, origin: window.location.origin },
           events: {
             onReady: () => adapter?.handleReady(),
             onStateChange: (e) => adapter?.handleStateChange(e.data),

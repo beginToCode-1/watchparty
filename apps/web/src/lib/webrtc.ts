@@ -196,6 +196,7 @@ class MeshManager {
       });
       if (this.destroyed) return stopAll(stream);
       this.camStream = stream;
+      this.watchCamEnded(stream);
     } else {
       if (this.camStream) stopAll(this.camStream);
       this.camStream = null;
@@ -203,6 +204,13 @@ class MeshManager {
     this.replaceAll(SLOT_CAM);
     useRoom.getState().patchCall({ localCam: this.camStream });
     this.setFlags({ video: on });
+  }
+
+  /** The browser can end a camera track itself (another app grabs it, driver reset, privacy key): reflect it as camera off. */
+  private watchCamEnded(stream: MediaStream): void {
+    stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+      if (this.camStream === stream) this.setCam(false).catch((err: unknown) => console.warn('camera off failed', err));
+    });
   }
 
   /** Must run inside the click handler (user gesture). Resolves false when the user cancels the picker. */
@@ -355,6 +363,7 @@ class MeshManager {
   adopt(m: LocalMedia): void {
     if (m.mic && !this.attachMic(m.mic)) stopAll(m.mic);
     this.camStream = m.cam;
+    if (m.cam) this.watchCamEnded(m.cam);
     this.screenStream = m.screen;
     m.screen?.getVideoTracks()[0]?.addEventListener('ended', () => this.stopScreenShare());
     for (let slot = 0; slot <= SLOT_SCREEN_AUDIO; slot++) this.replaceAll(slot);
