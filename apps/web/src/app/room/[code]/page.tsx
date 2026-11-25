@@ -2,11 +2,11 @@
 
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { roomCodeSchema, type ErrorCode } from '@watchparty/shared-types';
 import { BufferingBanner } from '@/components/BufferingBanner';
 import { CallBar } from '@/components/CallBar';
-import { CallGrid } from '@/components/CallGrid';
+import { CallGrid, CamBubbles } from '@/components/CallGrid';
 import { ChatPanel } from '@/components/ChatPanel';
 import { HandedOff } from '@/components/ExtensionHandoff';
 import { MediaUrlBar } from '@/components/MediaUrlBar';
@@ -128,11 +128,7 @@ function Room({ code }: { code: string }) {
       <section className="flex min-h-0 min-w-0 flex-col gap-3">
         <RoomHeader code={code} />
         <MediaUrlBar />
-        <div className="relative aspect-video w-full overflow-hidden rounded-3xl bg-black shadow-[0_30px_80px_-30px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.06] lg:aspect-auto lg:min-h-0 lg:flex-1">
-          <PlayerHost />
-          <ReactionOverlay />
-          <BufferingBanner />
-        </div>
+        <Stage />
         <div className="flex flex-wrap items-center justify-between gap-3">
           <ReactionBar />
           <CallBar />
@@ -142,6 +138,44 @@ function Room({ code }: { code: string }) {
       <SidePanel />
       <ErrorToast />
     </main>
+  );
+}
+
+/** Player + overlays. Fullscreen targets this box (not the <video>) so reactions and cam bubbles stay visible. */
+function Stage() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [full, setFull] = useState(false);
+  const [canFull, setCanFull] = useState(false);
+  useEffect(() => {
+    setCanFull(document.fullscreenEnabled);
+    const onChange = () => setFull(ref.current !== null && document.fullscreenElement === ref.current);
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+  const toggle = () => {
+    const p = full ? document.exitFullscreen() : ref.current?.requestFullscreen();
+    p?.catch((err: unknown) => console.warn('Fullscreen failed', err));
+  };
+  return (
+    <div
+      ref={ref}
+      className="relative aspect-video w-full overflow-hidden rounded-3xl bg-black shadow-[0_30px_80px_-30px_rgba(0,0,0,0.9)] ring-1 ring-white/[0.06] lg:aspect-auto lg:min-h-0 lg:flex-1 [&:fullscreen]:rounded-none"
+    >
+      <PlayerHost />
+      <ReactionOverlay />
+      <BufferingBanner />
+      {full && <CamBubbles />}
+      {canFull && (
+        <button
+          type="button"
+          onClick={toggle}
+          aria-pressed={full}
+          className="material pressable absolute left-3 top-3 z-40 rounded-full px-3 py-1.5 text-xs font-semibold tracking-caption opacity-70 hover:opacity-100 focus-visible:opacity-100"
+        >
+          {full ? 'Exit fullscreen' : 'Fullscreen'}
+        </button>
+      )}
+    </div>
   );
 }
 

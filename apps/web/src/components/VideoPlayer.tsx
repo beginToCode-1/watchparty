@@ -156,7 +156,7 @@ export function VideoPlayer({ src, kind, videoRef }: { src: string; kind: MediaK
 
   return (
     <div className="relative h-full w-full bg-black">
-      <video ref={ref} playsInline controls preload="auto" className="h-full w-full bg-black object-contain" />
+      <video ref={ref} playsInline controls controlsList="nofullscreen" preload="auto" className="h-full w-full bg-black object-contain" />
       <PipButton videoRef={ref} />
       {error && (
         <div role="alert" className="absolute inset-x-4 bottom-16 z-20 rounded-2xl bg-signal-err/15 p-4 text-sm text-red-100 backdrop-blur">
