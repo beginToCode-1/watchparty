@@ -4,6 +4,7 @@
 //                    pnpm party --local    -> no tunnel (http://localhost:4000 only)
 //                    pnpm party --no-build -> skip `pnpm build`
 import { spawn, spawnSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { setTimeout as wait } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -77,9 +78,14 @@ if (!args.has('--no-build')) {
 
 // Friends who sync Netflix/MovieBox etc. need the extension: hand them this zip (unzip → chrome://extensions → Load unpacked).
 // Windows' own bsdtar writes real zips with -a; Git Bash's GNU tar would write a tar named .zip.
+// Entries are named, not '.': a './' prefix makes Windows Explorer show the zip as empty.
 const zip =
   process.platform === 'win32'
-    ? spawnSync(`${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\tar.exe`, ['-a', '-c', '-f', 'watchparty-extension.zip', '-C', 'apps/extension/dist', '.'], { cwd: root })
+    ? spawnSync(
+        `${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\tar.exe`,
+        ['-a', '-c', '-f', 'watchparty-extension.zip', '-C', 'apps/extension/dist', ...readdirSync(`${root}/apps/extension/dist`)],
+        { cwd: root },
+      )
     : spawnSync('zip', ['-qr', '../../../watchparty-extension.zip', '.'], { cwd: `${root}/apps/extension/dist` });
 say(zip.status === 0 ? 'Extension for friends: watchparty-extension.zip (in the project folder)' : 'Could not zip the extension (send them apps/extension/dist instead).');
 
